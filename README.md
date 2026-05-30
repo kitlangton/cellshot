@@ -22,26 +22,23 @@ The first working backend uses the pure-Rust `vt100` parser to keep installation
 
 ## Install
 
-Install directly from the private GitHub repository on a machine whose SSH key can access it. `CARGO_NET_GIT_FETCH_WITH_CLI=true` makes Cargo use the system Git/SSH credentials for a private repository:
+Install the public crate from crates.io:
 
 ```bash
-CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --locked \
-  --git ssh://git@github.com/kitlangton/cellshot.git cellshot
+cargo install cellshot
 cellshot --help
 ```
 
-Update an existing installation after pulling a newer release:
+Update an existing installation:
 
 ```bash
-CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --locked --force \
-  --git ssh://git@github.com/kitlangton/cellshot.git cellshot
+cargo install --force cellshot
 ```
 
-If GitHub CLI authentication is already configured, cloning before installation is also simple:
+Collaborators with access to the private GitHub repository can also install the current source head:
 
 ```bash
-gh repo clone kitlangton/cellshot
-cargo install --locked --path cellshot
+cargo install --locked --git https://github.com/kitlangton/cellshot cellshot
 ```
 
 The repository is a binary crate: the installed product is the `cellshot` executable. No application embedding API is promised yet.

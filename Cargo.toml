@@ -9,7 +9,6 @@ repository = "https://github.com/kitlangton/cellshot"
 readme = "README.md"
 keywords = ["terminal", "tui", "screenshot", "automation", "ansi"]
 categories = ["command-line-utilities", "development-tools::testing"]
-publish = false
 include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
