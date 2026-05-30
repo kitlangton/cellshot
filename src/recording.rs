@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::frame::{Frame, from_screen};
 use crate::render;
 
+const MAX_VIDEO_FPS: u32 = 1000;
+/// Schema version written in the header of every `.cellshot` recording.
+pub const FORMAT_VERSION: u8 = 1;
+
+/// One JSON Lines entry in a `.cellshot` recording timeline.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Entry {
@@ -31,6 +36,7 @@ pub enum Entry {
     },
 }
 
+/// Source of bytes written to the application while recording a session.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputOrigin {
@@ -77,7 +83,7 @@ impl Writer {
         serde_json::to_writer(
             &mut file,
             &Entry::Header {
-                version: 1,
+                version: FORMAT_VERSION,
                 cols,
                 rows,
                 cell_width,
@@ -125,24 +131,19 @@ pub struct VideoOptions {
     pub fps: u32,
     pub max_idle: Option<Duration>,
     pub tail: Duration,
-    pub from_launch: bool,
+    pub include_startup: bool,
 }
 
 pub fn video(path: &Path, options: &VideoOptions) -> Result<()> {
     if options.fps == 0 {
         bail!("--fps must be greater than zero");
     }
+    if options.fps > MAX_VIDEO_FPS {
+        bail!("--fps must not exceed {MAX_VIDEO_FPS}");
+    }
     let recording = read(path)?;
     let states = states(&recording);
-    let states = if options.from_launch {
-        states.as_slice()
-    } else {
-        let visible = states
-            .iter()
-            .position(|frame| frame.frame.has_visible_content())
-            .unwrap_or(states.len());
-        &states[visible..]
-    };
+    let states = visible_states(&states, options.include_startup);
     if states.is_empty() {
         bail!("recording contains no visible output frames");
     }
@@ -168,15 +169,17 @@ pub fn video(path: &Path, options: &VideoOptions) -> Result<()> {
     result
 }
 
-struct Recording {
-    cols: u16,
-    rows: u16,
-    cell_width: u16,
-    cell_height: u16,
-    events: Vec<Entry>,
+/// Parsed recording metadata and timeline entries.
+pub struct Recording {
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub events: Vec<Entry>,
 }
 
-fn read(path: &Path) -> Result<Recording> {
+/// Read and validate a versioned `.cellshot` JSON Lines recording.
+pub fn read(path: &Path) -> Result<Recording> {
     let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut lines = BufReader::new(file).lines();
     let Some(header) = lines.next() else {
@@ -194,7 +197,7 @@ fn read(path: &Path) -> Result<Recording> {
     else {
         bail!("recording does not start with a header");
     };
-    if version != 1 {
+    if version != FORMAT_VERSION {
         bail!("unsupported recording version {version}");
     }
     let events = lines
@@ -218,7 +221,7 @@ struct VideoFrame {
 }
 
 fn states(recording: &Recording) -> Vec<VideoFrame> {
-    let mut parser = crate::capture::terminal(recording.rows, recording.cols);
+    let mut parser = crate::shot::terminal(recording.rows, recording.cols);
     let mut frames: Vec<VideoFrame> = Vec::new();
     frames.push(VideoFrame {
         at_ms: 0,
@@ -244,30 +247,58 @@ fn states(recording: &Recording) -> Vec<VideoFrame> {
     frames
 }
 
+fn visible_states(states: &[VideoFrame], include_startup: bool) -> &[VideoFrame] {
+    if include_startup {
+        return states;
+    }
+    let visible = states
+        .iter()
+        .position(|frame| has_non_whitespace_text(&frame.frame))
+        .or_else(|| {
+            states
+                .iter()
+                .position(|frame| frame.frame.has_visible_content())
+        })
+        .unwrap_or(states.len());
+    &states[visible..]
+}
+
+fn has_non_whitespace_text(frame: &Frame) -> bool {
+    frame.cells.iter().any(|cell| !cell.text.trim().is_empty())
+}
+
 fn samples(states: &[VideoFrame], options: &VideoOptions) -> Vec<Frame> {
-    let step_ms = (1000.0 / f64::from(options.fps)).round() as u64;
+    if states.is_empty() {
+        return Vec::new();
+    }
     let mut timeline = Vec::with_capacity(states.len());
-    let mut at_ms = 0;
+    let mut at_ms = 0_u64;
     for (index, state) in states.iter().enumerate() {
-        timeline.push(VideoFrame {
-            at_ms,
-            frame: state.frame.clone(),
-        });
+        timeline.push(at_ms);
         if let Some(next) = states.get(index + 1) {
             let gap = Duration::from_millis(next.at_ms.saturating_sub(state.at_ms));
-            at_ms += options.max_idle.map_or(gap, |max| gap.min(max)).as_millis() as u64;
+            let gap = options.max_idle.map_or(gap, |max| gap.min(max));
+            at_ms = at_ms.saturating_add(gap.as_millis() as u64);
         }
     }
-    let end_ms = at_ms + options.tail.as_millis() as u64;
+    let end_ms = at_ms.saturating_add(options.tail.as_millis() as u64);
     let mut output = Vec::new();
     let mut state = 0;
-    let mut sample_ms = 0;
-    while sample_ms <= end_ms {
-        while state + 1 < timeline.len() && timeline[state + 1].at_ms <= sample_ms {
+    let mut sample = 0_u64;
+    loop {
+        let sample_ms = u128::from(sample) * 1000 / u128::from(options.fps);
+        if sample_ms > u128::from(end_ms) {
+            break;
+        }
+        let sample_ms = sample_ms as u64;
+        while state + 1 < timeline.len() && timeline[state + 1] <= sample_ms {
             state += 1;
         }
-        output.push(timeline[state].frame.clone());
-        sample_ms += step_ms.max(1);
+        output.push(states[state].frame.clone());
+        sample += 1;
+    }
+    if output.last() != states.last().map(|state| &state.frame) {
+        output.push(states.last().expect("non-empty states").frame.clone());
     }
     output
 }
@@ -317,12 +348,74 @@ fn render_video_frames(
 mod tests {
     use super::*;
 
+    fn frame(text: &str) -> Frame {
+        Frame {
+            version: 1,
+            cols: 2,
+            rows: 1,
+            foreground: crate::frame::DEFAULT_FOREGROUND,
+            background: crate::frame::DEFAULT_BACKGROUND,
+            cursor: None,
+            cells: (!text.is_empty())
+                .then(|| crate::frame::Cell {
+                    x: 0,
+                    y: 0,
+                    text: text.to_owned(),
+                    width: 1,
+                    foreground: crate::frame::DEFAULT_FOREGROUND,
+                    background: crate::frame::DEFAULT_BACKGROUND,
+                    attributes: crate::frame::Attributes::default(),
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn options() -> VideoOptions {
+        VideoOptions {
+            out: PathBuf::from("video.mp4"),
+            cell_width: None,
+            cell_height: None,
+            padding: 0.0,
+            font_family: String::new(),
+            pixel_ratio: 1.0,
+            hide_cursor: true,
+            fps: 20,
+            max_idle: None,
+            tail: Duration::ZERO,
+            include_startup: false,
+        }
+    }
+
+    fn painted_frame() -> Frame {
+        let mut parser = crate::shot::terminal(1, 2);
+        parser.process(b"\x1b[48;2;30;34;42m ");
+        from_screen(parser.screen())
+    }
+
     #[test]
-    fn idle_compression_caps_frame_duration() {
-        assert_eq!(
-            Duration::from_secs(4).min(Duration::from_millis(500)),
-            Duration::from_millis(500)
+    fn idle_compression_caps_sampled_frame_duration() {
+        let initial = frame("a");
+        let final_frame = frame("b");
+        let mut options = options();
+        options.max_idle = Some(Duration::from_millis(500));
+
+        let frames = samples(
+            &[
+                VideoFrame {
+                    at_ms: 0,
+                    frame: initial,
+                },
+                VideoFrame {
+                    at_ms: 4000,
+                    frame: final_frame.clone(),
+                },
+            ],
+            &options,
         );
+
+        assert_eq!(frames.len(), 11);
+        assert_eq!(frames.last(), Some(&final_frame));
     }
 
     #[test]
@@ -347,18 +440,80 @@ mod tests {
     }
 
     #[test]
-    fn identifies_visible_frame_content_without_cursor() {
-        assert!(
-            !Frame {
-                version: 1,
-                cols: 1,
-                rows: 1,
-                foreground: crate::frame::DEFAULT_FOREGROUND,
-                background: crate::frame::DEFAULT_BACKGROUND,
-                cursor: None,
-                cells: Vec::new(),
-            }
-            .has_visible_content()
+    fn preserves_background_only_output_when_no_text_is_recorded() {
+        let painted = painted_frame();
+        let frames = vec![
+            VideoFrame {
+                at_ms: 0,
+                frame: frame(""),
+            },
+            VideoFrame {
+                at_ms: 1,
+                frame: painted.clone(),
+            },
+        ];
+
+        assert_eq!(visible_states(&frames, false)[0].frame, painted);
+    }
+
+    #[test]
+    fn keeps_final_change_between_sampling_ticks() {
+        let initial = frame("a");
+        let final_frame = frame("b");
+        let frames = samples(
+            &[
+                VideoFrame {
+                    at_ms: 0,
+                    frame: initial.clone(),
+                },
+                VideoFrame {
+                    at_ms: 1,
+                    frame: final_frame.clone(),
+                },
+            ],
+            &options(),
+        );
+
+        assert_eq!(frames, vec![initial, final_frame]);
+    }
+
+    #[test]
+    fn samples_fractional_frame_intervals_without_an_early_transition() {
+        let initial = frame("a");
+        let final_frame = frame("b");
+        let mut options = options();
+        options.fps = 30;
+
+        let frames = samples(
+            &[
+                VideoFrame {
+                    at_ms: 0,
+                    frame: initial.clone(),
+                },
+                VideoFrame {
+                    at_ms: 100,
+                    frame: final_frame.clone(),
+                },
+            ],
+            &options,
+        );
+
+        assert_eq!(
+            frames,
+            vec![initial.clone(), initial.clone(), initial, final_frame]
+        );
+    }
+
+    #[test]
+    fn rejects_excessive_video_frame_rates_before_reading_input() {
+        let mut options = options();
+        options.fps = MAX_VIDEO_FPS + 1;
+
+        assert_eq!(
+            video(Path::new("not-read.cellshot"), &options)
+                .unwrap_err()
+                .to_string(),
+            "--fps must not exceed 1000"
         );
     }
 }

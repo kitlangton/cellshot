@@ -1,15 +1,15 @@
 [package]
 name = "cellshot"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.93"
-description = "Capture terminal applications as styled, reviewable visual artifacts"
+description = "Export terminal shots as styled, reviewable visual artifacts"
 license = "MIT"
 repository = "https://github.com/kitlangton/cellshot"
 readme = "README.md"
 keywords = ["terminal", "tui", "screenshot", "automation", "ansi"]
 categories = ["command-line-utilities", "development-tools::testing"]
-include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/src/**", "/schemas/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0"

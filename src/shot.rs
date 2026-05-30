@@ -16,6 +16,8 @@ const OPENTUI_QUERY: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07";
 const PALETTE_QUERY: &[u8] = b"\x1b]4;0;?\x07";
 const KITTY_QUERY: &[u8] = b"\x1b_Gi=31337";
 
+/// Configuration for observing one terminal shot or starting a live session.
+#[derive(Clone, Debug)]
 pub struct Options {
     pub cols: u16,
     pub rows: u16,
@@ -31,12 +33,33 @@ pub struct Options {
     pub color: ColorMode,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            cols: 80,
+            rows: 24,
+            cell_width: 9,
+            cell_height: 18,
+            settle: Duration::from_millis(250),
+            deadline: Duration::from_secs(5),
+            input: Vec::new(),
+            initial_delay: Duration::ZERO,
+            wait_for: None,
+            max_bytes: 16 * 1024 * 1024,
+            opentui_host: false,
+            color: ColorMode::Auto,
+        }
+    }
+}
+
+/// A visible terminal frame together with its source ANSI/VT stream.
 #[derive(Deserialize, Serialize)]
-pub struct Captured {
+pub struct Shot {
     pub frame: Frame,
     pub ansi: Vec<u8>,
 }
 
+/// Environment policy applied to a launched command's color configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorMode {
     Auto,
@@ -44,19 +67,21 @@ pub enum ColorMode {
     Never,
 }
 
-pub fn ansi(bytes: Vec<u8>, rows: u16, cols: u16, max_bytes: usize) -> Result<Captured> {
+/// Construct a shot by replaying an ANSI/VT byte stream into a terminal frame.
+pub fn from_ansi(bytes: Vec<u8>, rows: u16, cols: u16, max_bytes: usize) -> Result<Shot> {
     if bytes.len() > max_bytes {
         bail!("terminal input exceeds --max-bytes ({max_bytes})");
     }
     let mut parser = terminal(rows, cols);
     parser.process(&bytes);
-    Ok(Captured {
+    Ok(Shot {
         frame: from_screen(parser.screen()),
         ansi: bytes,
     })
 }
 
-pub fn command(command: &[String], cwd: Option<&Path>, options: &Options) -> Result<Captured> {
+/// Observe a command launched inside a pseudo-terminal and return its settled shot.
+pub fn from_command(command: &[String], cwd: Option<&Path>, options: &Options) -> Result<Shot> {
     if command.is_empty() {
         bail!("provide a command after --");
     }
@@ -125,7 +150,7 @@ pub fn command(command: &[String], cwd: Option<&Path>, options: &Options) -> Res
             );
         }
         if !closed && Instant::now() < clock.deadline && !options.input.is_empty() {
-            // Once input is sent, the pre-input idle frame is no longer the capture target.
+            // Once input is sent, the pre-input idle frame is no longer the shot target.
             clock.last_output = None;
             host.send(&options.input)?;
             consume_until_settled(
@@ -137,7 +162,7 @@ pub fn command(command: &[String], cwd: Option<&Path>, options: &Options) -> Res
                 &mut clock,
             )?;
         }
-        Ok(Captured {
+        Ok(Shot {
             frame: from_screen(terminal.screen()),
             ansi,
         })
@@ -145,7 +170,7 @@ pub fn command(command: &[String], cwd: Option<&Path>, options: &Options) -> Res
     #[cfg(unix)]
     if let Some(process_group) = process_group {
         // portable-pty spawns the application as a session leader; kill its group so helpers do
-        // not retain the slave PTY after a frozen snapshot is returned.
+        // not retain the slave PTY after a frozen shot is returned.
         unsafe {
             libc::kill(-process_group, libc::SIGKILL);
         }
@@ -162,7 +187,12 @@ pub fn command(command: &[String], cwd: Option<&Path>, options: &Options) -> Res
     result
 }
 
-pub fn pipe_command(command: &[String], cwd: Option<&Path>, options: &Options) -> Result<Captured> {
+/// Observe piped command output and return its final rendered shot.
+pub fn from_pipe_command(
+    command: &[String],
+    cwd: Option<&Path>,
+    options: &Options,
+) -> Result<Shot> {
     if command.is_empty() {
         bail!("provide a command after --");
     }
@@ -172,6 +202,11 @@ pub fn pipe_command(command: &[String], cwd: Option<&Path>, options: &Options) -
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        builder.process_group(0);
+    }
     configure_process_environment(&mut builder, options.color);
     if let Some(cwd) = cwd {
         builder.current_dir(cwd);
@@ -179,56 +214,65 @@ pub fn pipe_command(command: &[String], cwd: Option<&Path>, options: &Options) -
     let mut child = builder
         .spawn()
         .with_context(|| format!("spawn command {:?}", command[0]))?;
+    #[cfg(unix)]
+    let process_group = i32::try_from(child.id()).ok();
     let stdout = child.stdout.take().context("open command stdout")?;
     let stderr = child.stderr.take().context("open command stderr")?;
     let (send, receive) = mpsc::sync_channel::<Option<Vec<u8>>>(32);
     spawn_pipe_reader(stdout, send.clone());
     spawn_pipe_reader(stderr, send);
 
-    let mut terminal = terminal(options.rows, options.cols);
-    let mut ansi = Vec::new();
-    let mut normalizer = LinefeedNormalizer::default();
-    let started = Instant::now();
-    let deadline = started + options.deadline;
-    let mut open_streams = 2_usize;
-    let mut exited = false;
-    while open_streams > 0 || !exited {
-        let timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(20));
-        if timeout.is_zero() {
-            break;
-        }
-        match receive.recv_timeout(timeout) {
-            Ok(Some(bytes)) => {
-                let bytes = normalizer.normalize(&bytes);
-                retain(&mut ansi, &bytes, options.max_bytes)?;
-                terminal.process(&bytes);
+    let result = (|| {
+        let mut terminal = terminal(options.rows, options.cols);
+        let mut ansi = Vec::new();
+        let mut normalizer = LinefeedNormalizer::default();
+        let deadline = Instant::now() + options.deadline;
+        let mut open_streams = 2_usize;
+        let mut exited = false;
+        while open_streams > 0 || !exited {
+            let timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20));
+            if timeout.is_zero() {
+                break;
             }
-            Ok(None) => open_streams = open_streams.saturating_sub(1),
-            Err(RecvTimeoutError::Disconnected) => open_streams = 0,
-            Err(RecvTimeoutError::Timeout) => {}
+            match receive.recv_timeout(timeout) {
+                Ok(Some(bytes)) => {
+                    let bytes = normalizer.normalize(&bytes);
+                    retain(&mut ansi, &bytes, options.max_bytes)?;
+                    terminal.process(&bytes);
+                }
+                Ok(None) => open_streams = open_streams.saturating_sub(1),
+                Err(RecvTimeoutError::Disconnected) => open_streams = 0,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if !exited {
+                exited = child.try_wait().context("wait for command")?.is_some();
+            }
         }
-        if !exited {
-            exited = child.try_wait().context("wait for command")?.is_some();
-        }
-    }
-    if !exited {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
 
-    if let Some(pattern) = options.wait_for.as_deref()
-        && !terminal.screen().contents().contains(pattern)
-    {
-        bail!(
-            "visible terminal did not include --wait-for {pattern:?} before command ended or deadline elapsed"
-        );
+        if let Some(pattern) = options.wait_for.as_deref()
+            && !terminal.screen().contents().contains(pattern)
+        {
+            bail!(
+                "visible terminal did not include --wait-for {pattern:?} before command ended or deadline elapsed"
+            );
+        }
+        Ok(Shot {
+            frame: from_screen(terminal.screen()),
+            ansi,
+        })
+    })();
+    #[cfg(unix)]
+    if let Some(process_group) = process_group {
+        // Pipe shots own their launched command tree; do not leave diagnostic descendants alive.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
     }
-    Ok(Captured {
-        frame: from_screen(terminal.screen()),
-        ansi,
-    })
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
 fn spawn_pipe_reader(
@@ -271,7 +315,7 @@ impl LinefeedNormalizer {
     }
 }
 
-fn configure_pty_environment(builder: &mut CommandBuilder, color: ColorMode) {
+pub(crate) fn configure_pty_environment(builder: &mut CommandBuilder, color: ColorMode) {
     builder.env("TERM", "xterm-truecolor");
     builder.env("COLORTERM", "truecolor");
     match color {
@@ -459,6 +503,11 @@ impl Host {
         self.writer.flush().context("flush terminal input")
     }
 
+    pub(crate) fn resize(&mut self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
+        self.pixel_width = u32::from(cols) * u32::from(cell_width);
+        self.pixel_height = u32::from(rows) * u32::from(cell_height);
+    }
+
     pub(crate) fn respond(&mut self, output: &[u8]) -> Result<Vec<u8>> {
         if !self.enabled {
             return Ok(Vec::new());
@@ -554,7 +603,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_command_captures_non_tty_output() {
-        let captured = pipe_command(
+        let captured = from_pipe_command(
             &[
                 "sh".to_owned(),
                 "-c".to_owned(),
@@ -580,6 +629,28 @@ mod tests {
 
         assert_eq!(captured.frame.text(), "one\ntwo");
         assert!(captured.ansi.windows(2).any(|window| window == b"\r\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_shot_terminates_descendant_processes() {
+        let captured = from_pipe_command(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "sleep 30 & printf '%s' \"$!\"".to_owned(),
+            ],
+            None,
+            &Options {
+                deadline: Duration::from_millis(50),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let pid = captured.frame.text().parse::<i32>().unwrap();
+        thread::sleep(Duration::from_millis(20));
+
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     }
 
     #[test]

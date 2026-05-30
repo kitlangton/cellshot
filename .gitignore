@@ -1,5 +1,9 @@
 /target
 /captures
+/docs/screenshots/*.ansi
+/docs/screenshots/*.json
+/docs/screenshots/*.svg
+/docs/screenshots/*.txt
 *.dylib
 *.so
 *.dll

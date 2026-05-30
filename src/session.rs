@@ -1,27 +1,435 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
+use vt100::Parser;
 
-use crate::capture::{Captured, Options};
+use crate::frame::from_screen;
+use crate::recording::{self, InputOrigin};
+use crate::shot::{self, Host, Options, Shot};
+
+const OUTPUT_BATCH: usize = 32;
+const SCROLLBACK_ROWS: usize = 10_000;
+
+struct Output {
+    at_ms: u64,
+    bytes: Vec<u8>,
+}
+
+/// One running terminal application controlled in-process by its caller.
+///
+/// `Session` is the embedded equivalent of the CLI `session` lifecycle. It owns a PTY and the
+/// visible terminal state, so callers can send input, wait for content, take shots, and resize
+/// without spawning a new `cellshot` command for each action.
+pub struct Session {
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send>,
+    #[cfg(unix)]
+    process_group: Option<i32>,
+    parser: Parser,
+    ansi: Vec<u8>,
+    host: Host,
+    receive: Receiver<Option<Output>>,
+    max_bytes: usize,
+    closed: bool,
+    last_output: Option<Instant>,
+    recording: Option<recording::Writer>,
+    cols: u16,
+    rows: u16,
+    cell_width: u16,
+    cell_height: u16,
+}
+
+/// Lifecycle state of a running or completed session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionState {
+    Running,
+    Exited,
+}
+
+/// Observable state of one embedded or named terminal session.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionStatus {
+    pub state: SessionState,
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub idle_for_ms: Option<u64>,
+    pub has_visible_content: bool,
+    pub recording: bool,
+}
+
+/// One named daemon session discovered in the local runtime directory.
+#[derive(Debug, Serialize)]
+pub struct NamedSessionStatus {
+    pub name: String,
+    pub status: Option<SessionStatus>,
+    pub error: Option<String>,
+}
+
+impl Session {
+    /// Start `command` inside a live PTY-backed session.
+    pub fn start(
+        command: &[String],
+        cwd: Option<&Path>,
+        record: Option<&Path>,
+        options: &Options,
+    ) -> Result<Self> {
+        if command.is_empty() {
+            bail!("provide a command after --");
+        }
+        if options.cols == 0 || options.rows == 0 {
+            bail!("terminal dimensions must be greater than zero");
+        }
+        let started = Instant::now();
+        let recording = record
+            .map(|path| {
+                recording::Writer::new(
+                    path,
+                    started,
+                    options.cols,
+                    options.rows,
+                    options.cell_width,
+                    options.cell_height,
+                )
+            })
+            .transpose()?;
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: options.rows,
+                cols: options.cols,
+                pixel_width: options.cell_width,
+                pixel_height: options.cell_height,
+            })
+            .context("open session pseudo-terminal")?;
+        let mut builder = CommandBuilder::new(&command[0]);
+        builder.args(&command[1..]);
+        shot::configure_pty_environment(&mut builder, options.color);
+        if let Some(cwd) = cwd {
+            builder.cwd(cwd);
+        }
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .context("open session PTY reader")?;
+        let writer = pair
+            .master
+            .take_writer()
+            .context("open session PTY writer")?;
+        let child = pair
+            .slave
+            .spawn_command(builder)
+            .context("spawn session command")?;
+        drop(pair.slave);
+        #[cfg(unix)]
+        let process_group = child.process_id().and_then(|pid| i32::try_from(pid).ok());
+        let (send, receive) = mpsc::sync_channel(32);
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 16 * 1024];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(len) => {
+                        if send
+                            .send(Some(Output {
+                                at_ms: started.elapsed().as_millis() as u64,
+                                bytes: buffer[..len].to_vec(),
+                            }))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = send.send(None);
+        });
+        Ok(Self {
+            master: pair.master,
+            child,
+            #[cfg(unix)]
+            process_group,
+            parser: session_terminal(options.rows, options.cols),
+            ansi: Vec::new(),
+            host: Host::new(writer, options),
+            receive,
+            max_bytes: options.max_bytes,
+            closed: false,
+            last_output: None,
+            recording,
+            cols: options.cols,
+            rows: options.rows,
+            cell_width: options.cell_width,
+            cell_height: options.cell_height,
+        })
+    }
+
+    /// Send one input burst to the terminal application.
+    pub fn send(&mut self, input: &[u8]) -> Result<()> {
+        self.send_all(&[input.to_vec()], Duration::ZERO)
+    }
+
+    /// Send ordered input bursts, optionally pacing them for recorded interactions.
+    pub fn send_all(&mut self, input: &[Vec<u8>], pace: Duration) -> Result<()> {
+        self.consume()?;
+        if self.closed {
+            bail!("session command has exited");
+        }
+        let last = input.len().saturating_sub(1);
+        for (index, bytes) in input.iter().enumerate() {
+            self.host.send(bytes)?;
+            if let Some(recording) = &mut self.recording {
+                recording.input(InputOrigin::Client, bytes)?;
+            }
+            if !pace.is_zero() && index < last {
+                thread::sleep(pace);
+                self.consume()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Wait until visible terminal text contains `text`.
+    pub fn wait_for_text(&mut self, text: &str, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.consume()?;
+            if self.parser.screen().contents().contains(text) {
+                return Ok(());
+            }
+            if self.closed {
+                bail!("session ended before visible terminal included {text:?}");
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out waiting for visible terminal text {text:?}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Wait until no terminal output has arrived for `settle`.
+    pub fn wait_for_idle(&mut self, settle: Duration, timeout: Duration) -> Result<()> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        loop {
+            self.consume()?;
+            if self.closed || self.last_output.unwrap_or(started).elapsed() >= settle {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out waiting for terminal output to settle");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Freeze the current terminal state after output settles or the deadline elapses.
+    pub fn shot(&mut self, settle: Duration, deadline: Duration) -> Result<Shot> {
+        let started = Instant::now();
+        let deadline = started + deadline;
+        loop {
+            self.consume()?;
+            if self.closed
+                || self.last_output.unwrap_or(started).elapsed() >= settle
+                || Instant::now() >= deadline
+            {
+                return Ok(Shot {
+                    frame: from_screen(self.parser.screen()),
+                    ansi: self.ansi.clone(),
+                });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Inspect session lifecycle, geometry, and whether a visible frame is available.
+    pub fn status(&mut self) -> Result<SessionStatus> {
+        self.consume()?;
+        Ok(SessionStatus {
+            state: if self.closed {
+                SessionState::Exited
+            } else {
+                SessionState::Running
+            },
+            cols: self.cols,
+            rows: self.rows,
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            idle_for_ms: self
+                .last_output
+                .map(|last| last.elapsed().as_millis() as u64),
+            has_visible_content: from_screen(self.parser.screen()).has_visible_content(),
+            recording: self.recording.is_some(),
+        })
+    }
+
+    /// Return readable normal-screen scrollback, or the exact retained ANSI/VT stream.
+    pub fn history(&mut self, ansi: bool) -> Result<Vec<u8>> {
+        self.consume()?;
+        if ansi {
+            return Ok(self.ansi.clone());
+        }
+        let mut screen = self.parser.screen().clone();
+        screen.set_scrollback(usize::MAX);
+        let mut offset = screen.scrollback();
+        let mut lines = Vec::new();
+        while offset > 0 {
+            screen.set_scrollback(offset);
+            let count = offset.min(usize::from(self.rows));
+            lines.extend(
+                screen
+                    .rows(0, self.cols)
+                    .take(count)
+                    .map(|line| line.trim_end().to_owned()),
+            );
+            offset = offset.saturating_sub(usize::from(self.rows));
+        }
+        screen.set_scrollback(0);
+        lines.extend(
+            screen
+                .rows(0, self.cols)
+                .map(|line| line.trim_end().to_owned()),
+        );
+        Ok(lines.join("\n").trim_end().as_bytes().to_vec())
+    }
+
+    /// Resize the PTY and reflow subsequent terminal parsing at the new dimensions.
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+    ) -> Result<()> {
+        if cols == 0 || rows == 0 {
+            bail!("terminal dimensions must be greater than zero");
+        }
+        if self.recording.is_some() {
+            bail!("resizing recorded sessions is not yet supported");
+        }
+        self.consume()?;
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: cell_width,
+                pixel_height: cell_height,
+            })
+            .context("resize session pseudo-terminal")?;
+        self.host.resize(cols, rows, cell_width, cell_height);
+        self.parser = session_terminal(rows, cols);
+        self.parser.process(&self.ansi);
+        self.cols = cols;
+        self.rows = rows;
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        Ok(())
+    }
+
+    /// Terminate the application owned by this session.
+    pub fn stop(&mut self) -> Result<()> {
+        self.terminate();
+        Ok(())
+    }
+
+    fn consume(&mut self) -> Result<()> {
+        for _ in 0..OUTPUT_BATCH {
+            match self.receive.try_recv() {
+                Ok(Some(output)) => {
+                    if let Some(recording) = &mut self.recording {
+                        recording.output(output.at_ms, &output.bytes)?;
+                    }
+                    let response = self.host.respond(&output.bytes)?;
+                    if !response.is_empty()
+                        && let Some(recording) = &mut self.recording
+                    {
+                        recording.input(InputOrigin::Host, &response)?;
+                    }
+                    shot::retain(&mut self.ansi, &output.bytes, self.max_bytes)?;
+                    self.parser.process(&output.bytes);
+                    self.last_output = Some(Instant::now());
+                }
+                Ok(None) | Err(TryRecvError::Disconnected) => {
+                    self.closed = true;
+                    return Ok(());
+                }
+                Err(TryRecvError::Empty) => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
+    fn terminate(&mut self) {
+        if self.closed {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(process_group) = self.process_group.take() {
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill();
+        self.closed = true;
+    }
+}
+
+fn session_terminal(rows: u16, cols: u16) -> Parser {
+    Parser::new(rows, cols, SCROLLBACK_ROWS)
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 enum Request {
     Ping,
-    Wait { text: String, timeout_ms: u64 },
-    Send { input: Vec<Vec<u8>>, pace_ms: u64 },
-    Snapshot { settle_ms: u64, deadline_ms: u64 },
-    Close,
+    Status,
+    Wait {
+        text: String,
+        timeout_ms: u64,
+    },
+    Send {
+        input: Vec<Vec<u8>>,
+        pace_ms: u64,
+    },
+    Shot {
+        settle_ms: u64,
+        deadline_ms: u64,
+    },
+    History {
+        ansi: bool,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+        cell_width: Option<u16>,
+        cell_height: Option<u16>,
+    },
+    Stop,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Response {
     error: Option<String>,
-    captured: Option<Captured>,
+    captured: Option<Shot>,
+    status: Option<SessionStatus>,
+    history: Option<Vec<u8>>,
 }
 
-pub fn launch(
+#[doc(hidden)]
+pub fn start(
     name: &str,
     command: &[String],
     cwd: Option<&Path>,
@@ -29,9 +437,30 @@ pub fn launch(
     options: &Options,
 ) -> Result<()> {
     validate_name(name)?;
-    implementation::launch(name, command, cwd, record, options)
+    implementation::start(name, command, cwd, record, options)
 }
 
+#[doc(hidden)]
+pub fn restart(
+    name: &str,
+    command: &[String],
+    cwd: Option<&Path>,
+    record: Option<&Path>,
+    options: &Options,
+) -> Result<()> {
+    if request(name, Request::Stop).is_ok() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while request(name, Request::Ping).is_ok() {
+            if Instant::now() >= deadline {
+                bail!("timed out stopping session {name:?} before restart");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    start(name, command, cwd, record, options)
+}
+
+#[doc(hidden)]
 pub fn wait(name: &str, text: String, timeout: Duration) -> Result<()> {
     request(
         name,
@@ -43,6 +472,14 @@ pub fn wait(name: &str, text: String, timeout: Duration) -> Result<()> {
     Ok(())
 }
 
+#[doc(hidden)]
+pub fn status(name: &str) -> Result<SessionStatus> {
+    request(name, Request::Status)?
+        .status
+        .ok_or_else(|| anyhow::anyhow!("session did not return status"))
+}
+
+#[doc(hidden)]
 pub fn send(name: &str, input: Vec<Vec<u8>>, pace: Duration) -> Result<()> {
     request(
         name,
@@ -54,23 +491,58 @@ pub fn send(name: &str, input: Vec<Vec<u8>>, pace: Duration) -> Result<()> {
     Ok(())
 }
 
-pub fn snapshot(name: &str, settle: Duration, deadline: Duration) -> Result<Captured> {
+#[doc(hidden)]
+pub fn shot(name: &str, settle: Duration, deadline: Duration) -> Result<Shot> {
     request(
         name,
-        Request::Snapshot {
+        Request::Shot {
             settle_ms: settle.as_millis() as u64,
             deadline_ms: deadline.as_millis() as u64,
         },
     )?
     .captured
-    .ok_or_else(|| anyhow::anyhow!("session did not return a snapshot"))
+    .ok_or_else(|| anyhow::anyhow!("session did not return a shot"))
 }
 
-pub fn close(name: &str) -> Result<()> {
-    request(name, Request::Close)?;
+#[doc(hidden)]
+pub fn resize(
+    name: &str,
+    cols: u16,
+    rows: u16,
+    cell_width: Option<u16>,
+    cell_height: Option<u16>,
+) -> Result<()> {
+    request(
+        name,
+        Request::Resize {
+            cols,
+            rows,
+            cell_width,
+            cell_height,
+        },
+    )?;
     Ok(())
 }
 
+#[doc(hidden)]
+pub fn history(name: &str, ansi: bool) -> Result<Vec<u8>> {
+    request(name, Request::History { ansi })?
+        .history
+        .ok_or_else(|| anyhow::anyhow!("session did not return history"))
+}
+
+#[doc(hidden)]
+pub fn list() -> Result<Vec<NamedSessionStatus>> {
+    implementation::list()
+}
+
+#[doc(hidden)]
+pub fn stop(name: &str) -> Result<()> {
+    request(name, Request::Stop)?;
+    Ok(())
+}
+
+#[doc(hidden)]
 pub fn serve(
     socket: PathBuf,
     command: Vec<String>,
@@ -113,28 +585,16 @@ mod implementation {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
-    use std::sync::mpsc::{self, Receiver, TryRecvError};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use vt100::Parser;
 
-    use super::{Request, Response};
-    use crate::capture::{self, Captured, Host, Options};
-    use crate::frame::from_screen;
-    use crate::recording::{self, InputOrigin};
+    use super::{NamedSessionStatus, Request, Response, Session};
+    use crate::shot::{self, Options};
 
     const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
     const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
-    const OUTPUT_BATCH: usize = 32;
-
-    struct Output {
-        at_ms: u64,
-        bytes: Vec<u8>,
-    }
-
     pub fn runtime_dir() -> Result<PathBuf> {
         let path = std::env::var_os("CELLSHOT_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -172,7 +632,7 @@ mod implementation {
         Ok(())
     }
 
-    pub fn launch(
+    pub fn start(
         name: &str,
         command: &[String],
         cwd: Option<&Path>,
@@ -188,8 +648,14 @@ mod implementation {
             if request(socket.clone(), &Request::Ping).is_ok() {
                 bail!("session {name:?} is already running");
             }
-            fs::remove_file(&socket)
-                .with_context(|| format!("remove stale {}", socket.display()))?;
+            match fs::remove_file(&socket) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("remove stale {}", socket.display()));
+                }
+            }
         }
         let mut daemon =
             Command::new(std::env::current_exe().context("locate cellshot executable")?);
@@ -209,6 +675,15 @@ mod implementation {
             .arg(options.max_bytes.to_string());
         if options.opentui_host {
             daemon.arg("--opentui-host");
+        }
+        match options.color {
+            shot::ColorMode::Auto => {}
+            shot::ColorMode::Always => {
+                daemon.arg("--color").arg("always");
+            }
+            shot::ColorMode::Never => {
+                daemon.arg("--color").arg("never");
+            }
         }
         if let Some(cwd) = cwd {
             daemon.arg("--cwd").arg(cwd);
@@ -258,6 +733,34 @@ mod implementation {
         serde_json::from_reader(stream).context("read session response")
     }
 
+    pub fn list() -> Result<Vec<NamedSessionStatus>> {
+        let mut sessions = Vec::new();
+        for entry in fs::read_dir(runtime_dir()?).context("read session runtime directory")? {
+            let path = entry.context("read session runtime entry")?.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("sock") {
+                continue;
+            }
+            let Some(name) = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let (status, error) = match request(path, &Request::Status) {
+                Ok(response) => (response.status, response.error),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+            sessions.push(NamedSessionStatus {
+                name,
+                status,
+                error,
+            });
+        }
+        sessions.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(sessions)
+    }
+
     pub fn serve(
         socket: PathBuf,
         command: Vec<String>,
@@ -269,20 +772,6 @@ mod implementation {
         if command.is_empty() {
             bail!("provide a command after --");
         }
-        let started = Instant::now();
-        let recording = record
-            .as_deref()
-            .map(|path| {
-                recording::Writer::new(
-                    path,
-                    started,
-                    options.cols,
-                    options.rows,
-                    options.cell_width,
-                    options.cell_height,
-                )
-            })
-            .transpose()?;
         let listener =
             UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
@@ -290,74 +779,9 @@ mod implementation {
         listener
             .set_nonblocking(true)
             .context("set session socket nonblocking")?;
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: options.rows,
-                cols: options.cols,
-                pixel_width: options.cell_width,
-                pixel_height: options.cell_height,
-            })
-            .context("open session pseudo-terminal")?;
-        let mut builder = CommandBuilder::new(&command[0]);
-        builder.args(&command[1..]);
-        builder.env("TERM", "xterm-truecolor");
-        builder.env("COLORTERM", "truecolor");
-        if let Some(cwd) = cwd.as_deref() {
-            builder.cwd(cwd);
-        }
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .context("open session PTY reader")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("open session PTY writer")?;
-        let mut child = pair
-            .slave
-            .spawn_command(builder)
-            .context("spawn session command")?;
-        drop(pair.slave);
-        let process_group = child.process_id().and_then(|pid| i32::try_from(pid).ok());
-        let (send, receive) = mpsc::sync_channel(32);
-        let _reader_thread = thread::spawn(move || {
-            let mut buffer = [0_u8; 16 * 1024];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(len) => {
-                        if send
-                            .send(Some(Output {
-                                at_ms: started.elapsed().as_millis() as u64,
-                                bytes: buffer[..len].to_vec(),
-                            }))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = send.send(None);
-        });
-        let mut state = State {
-            parser: capture::terminal(options.rows, options.cols),
-            ansi: Vec::new(),
-            host: Host::new(writer, &options),
-            receive,
-            max_bytes: options.max_bytes,
-            closed: false,
-            last_output: None,
-            recording,
-        };
-        let result = run(&listener, &mut state);
-        if let Some(process_group) = process_group {
-            unsafe {
-                libc::kill(-process_group, libc::SIGKILL);
-            }
-        }
-        let _ = child.kill();
+        let mut session = Session::start(&command, cwd.as_deref(), record.as_deref(), &options)?;
+        let result = run(&listener, &mut session);
+        let _ = session.stop();
         let _ = fs::remove_file(&socket);
         result
     }
@@ -372,12 +796,13 @@ mod implementation {
         Ok(())
     }
 
-    fn run(listener: &UnixListener, state: &mut State) -> Result<()> {
+    fn run(listener: &UnixListener, session: &mut Session) -> Result<()> {
         loop {
-            state.consume()?;
+            // Keep parsing and recording output even when no control request is in flight.
+            session.consume()?;
             match listener.accept() {
                 Ok((stream, _)) => {
-                    if handle(stream, state)? {
+                    if handle(stream, session)? {
                         return Ok(());
                     }
                 }
@@ -389,7 +814,7 @@ mod implementation {
         }
     }
 
-    fn handle(mut stream: UnixStream, state: &mut State) -> Result<bool> {
+    fn handle(mut stream: UnixStream, session: &mut Session) -> Result<bool> {
         stream
             .set_nonblocking(false)
             .context("set session connection blocking")?;
@@ -407,21 +832,22 @@ mod implementation {
             Ok(_) if bytes.len() as u64 > MAX_REQUEST_BYTES => Response {
                 error: Some("session request exceeds 1 MiB".to_owned()),
                 captured: None,
+                status: None,
+                history: None,
             },
             Ok(_) => match serde_json::from_slice::<Request>(&bytes) {
                 Ok(request) => {
-                    let close = matches!(request, Request::Close);
-                    let response = match state.respond(request) {
-                        Ok(captured) => Response {
-                            error: None,
-                            captured,
-                        },
+                    let stop = matches!(request, Request::Stop);
+                    let response = match respond(session, request) {
+                        Ok(response) => response,
                         Err(error) => Response {
                             error: Some(format!("{error:#}")),
                             captured: None,
+                            status: None,
+                            history: None,
                         },
                     };
-                    if write_response(&mut stream, &response).is_ok() && close {
+                    if write_response(&mut stream, &response).is_ok() && stop {
                         return Ok(true);
                     }
                     return Ok(false);
@@ -429,11 +855,15 @@ mod implementation {
                 Err(error) => Response {
                     error: Some(format!("invalid session request: {error}")),
                     captured: None,
+                    status: None,
+                    history: None,
                 },
             },
             Err(error) => Response {
                 error: Some(format!("failed to read session request: {error}")),
                 captured: None,
+                status: None,
+                history: None,
             },
         };
         let _ = write_response(&mut stream, &response);
@@ -445,118 +875,62 @@ mod implementation {
         stream.flush().context("flush session response")
     }
 
-    struct State {
-        parser: Parser,
-        ansi: Vec<u8>,
-        host: Host,
-        receive: Receiver<Option<Output>>,
-        max_bytes: usize,
-        closed: bool,
-        last_output: Option<Instant>,
-        recording: Option<recording::Writer>,
-    }
-
-    impl State {
-        fn consume(&mut self) -> Result<()> {
-            for _ in 0..OUTPUT_BATCH {
-                match self.receive.try_recv() {
-                    Ok(Some(output)) => {
-                        if let Some(recording) = &mut self.recording {
-                            recording.output(output.at_ms, &output.bytes)?;
-                        }
-                        let response = self.host.respond(&output.bytes)?;
-                        if !response.is_empty()
-                            && let Some(recording) = &mut self.recording
-                        {
-                            recording.input(InputOrigin::Host, &response)?;
-                        }
-                        capture::retain(&mut self.ansi, &output.bytes, self.max_bytes)?;
-                        self.parser.process(&output.bytes);
-                        self.last_output = Some(Instant::now());
-                    }
-                    Ok(None) | Err(TryRecvError::Disconnected) => {
-                        self.closed = true;
-                        return Ok(());
-                    }
-                    Err(TryRecvError::Empty) => return Ok(()),
-                }
+    fn respond(session: &mut Session, request: Request) -> Result<Response> {
+        let mut response = Response {
+            error: None,
+            captured: None,
+            status: None,
+            history: None,
+        };
+        match request {
+            Request::Ping => {}
+            Request::Status => response.status = Some(session.status()?),
+            Request::Send { input, pace_ms } => {
+                session.send_all(&input, Duration::from_millis(pace_ms))?;
             }
-            Ok(())
-        }
-
-        fn respond(&mut self, request: Request) -> Result<Option<Captured>> {
-            match request {
-                Request::Ping => Ok(None),
-                Request::Send { input, pace_ms } => {
-                    if self.closed {
-                        bail!("session command has exited");
-                    }
-                    let last = input.len().saturating_sub(1);
-                    for (index, bytes) in input.into_iter().enumerate() {
-                        self.host.send(&bytes)?;
-                        if let Some(recording) = &mut self.recording {
-                            recording.input(InputOrigin::Client, &bytes)?;
-                        }
-                        if pace_ms > 0 && index < last {
-                            thread::sleep(Duration::from_millis(pace_ms));
-                            self.consume()?;
-                        }
-                    }
-                    Ok(None)
-                }
-                Request::Wait { text, timeout_ms } => {
-                    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-                    loop {
-                        self.consume()?;
-                        if self.parser.screen().contents().contains(&text) {
-                            return Ok(None);
-                        }
-                        if self.closed {
-                            bail!("session ended before visible terminal included {text:?}");
-                        }
-                        if Instant::now() >= deadline {
-                            bail!("timed out waiting for visible terminal text {text:?}");
-                        }
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                }
-                Request::Snapshot {
-                    settle_ms,
-                    deadline_ms,
-                } => {
-                    let started = Instant::now();
-                    let deadline = started + Duration::from_millis(deadline_ms);
-                    loop {
-                        self.consume()?;
-                        if self.closed
-                            || self.last_output.unwrap_or(started).elapsed()
-                                >= Duration::from_millis(settle_ms)
-                            || Instant::now() >= deadline
-                        {
-                            return Ok(Some(Captured {
-                                frame: from_screen(self.parser.screen()),
-                                ansi: self.ansi.clone(),
-                            }));
-                        }
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                }
-                Request::Close => Ok(None),
+            Request::Wait { text, timeout_ms } => {
+                session.wait_for_text(&text, Duration::from_millis(timeout_ms))?;
             }
+            Request::Shot {
+                settle_ms,
+                deadline_ms,
+            } => {
+                response.captured = Some(session.shot(
+                    Duration::from_millis(settle_ms),
+                    Duration::from_millis(deadline_ms),
+                )?);
+            }
+            Request::History { ansi } => response.history = Some(session.history(ansi)?),
+            Request::Resize {
+                cols,
+                rows,
+                cell_width,
+                cell_height,
+            } => {
+                let status = session.status()?;
+                session.resize(
+                    cols,
+                    rows,
+                    cell_width.unwrap_or(status.cell_width),
+                    cell_height.unwrap_or(status.cell_height),
+                )?;
+            }
+            Request::Stop => session.stop()?,
         }
+        Ok(response)
     }
 }
 
 #[cfg(not(unix))]
 mod implementation {
-    use super::{Options, Request, Response};
+    use super::{NamedSessionStatus, Options, Request, Response};
     use anyhow::{Result, bail};
     use std::path::{Path, PathBuf};
 
     pub fn runtime_dir() -> Result<PathBuf> {
         bail!("persistent sessions require Unix sockets")
     }
-    pub fn launch(
+    pub fn start(
         _: &str,
         _: &[String],
         _: Option<&Path>,
@@ -568,6 +942,9 @@ mod implementation {
     pub fn request(_: PathBuf, _: &Request) -> Result<Response> {
         bail!("persistent sessions require Unix sockets")
     }
+    pub fn list() -> Result<Vec<NamedSessionStatus>> {
+        bail!("persistent sessions require Unix sockets")
+    }
     pub fn serve(
         _: PathBuf,
         _: Vec<String>,
@@ -576,5 +953,113 @@ mod implementation {
         _: Options,
     ) -> Result<()> {
         bail!("persistent sessions require Unix sockets")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_session_waits_sends_resizes_and_takes_a_shot() {
+        let mut session = Session::start(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf ready; IFS= read -r line; printf '\\r\\ngot:%s' \"$line\"; sleep 1"
+                    .to_owned(),
+            ],
+            None,
+            None,
+            &Options {
+                cols: 20,
+                rows: 4,
+                settle: Duration::from_millis(10),
+                deadline: Duration::from_secs(2),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+
+        session
+            .wait_for_text("ready", Duration::from_secs(2))
+            .unwrap();
+        session.send(b"hello\r").unwrap();
+        session
+            .wait_for_text("got:hello", Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(session.status().unwrap().state, SessionState::Running);
+        session
+            .wait_for_idle(Duration::from_millis(10), Duration::from_secs(2))
+            .unwrap();
+        session.resize(30, 5, 9, 18).unwrap();
+        let shot = session
+            .shot(Duration::from_millis(10), Duration::from_secs(2))
+            .unwrap();
+
+        assert_eq!((shot.frame.cols, shot.frame.rows), (30, 5));
+        assert!(shot.frame.text().contains("got:hello"));
+        session.stop().unwrap();
+        assert_eq!(session.status().unwrap().state, SessionState::Exited);
+        assert!(session.shot(Duration::ZERO, Duration::ZERO).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_session_rejects_resize_until_timelines_support_geometry_changes() {
+        let record = std::env::temp_dir().join(format!(
+            "cellshot-recorded-resize-test-{}.cellshot",
+            std::process::id()
+        ));
+        let mut session = Session::start(
+            &["sh".to_owned(), "-c".to_owned(), "sleep 1".to_owned()],
+            None,
+            Some(&record),
+            &Options::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.resize(100, 32, 9, 18).unwrap_err().to_string(),
+            "resizing recorded sessions is not yet supported"
+        );
+        session.stop().unwrap();
+        let _ = std::fs::remove_file(record);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_exposes_normal_screen_scrollback_and_raw_stream() {
+        let mut session = Session::start(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n'; sleep 1".to_owned(),
+            ],
+            None,
+            None,
+            &Options {
+                cols: 20,
+                rows: 2,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        session
+            .wait_for_text("five", Duration::from_secs(2))
+            .unwrap();
+
+        let history = String::from_utf8(session.history(false).unwrap()).unwrap();
+        assert!(history.contains("one"));
+        assert!(history.contains("five"));
+        assert!(
+            session
+                .history(true)
+                .unwrap()
+                .windows(3)
+                .any(|bytes| bytes == b"one")
+        );
+        session.stop().unwrap();
     }
 }

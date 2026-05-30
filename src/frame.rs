@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use vt100::{Color as TerminalColor, Screen};
 
+/// Schema version written in every structured terminal frame.
+pub const FORMAT_VERSION: u8 = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Color {
     pub r: u8,
@@ -143,7 +146,7 @@ pub fn from_screen(screen: &Screen) -> Frame {
     }
     let (cursor_y, cursor_x) = screen.cursor_position();
     Frame {
-        version: 1,
+        version: FORMAT_VERSION,
         cols,
         rows,
         foreground,
@@ -331,5 +334,13 @@ mod tests {
                 b: 128
             }
         );
+    }
+
+    #[test]
+    fn background_paint_is_visible_content() {
+        let mut parser = vt100::Parser::new(1, 2, 0);
+        parser.process(b"\x1b[48;2;30;34;42m ");
+
+        assert!(from_screen(parser.screen()).has_visible_content());
     }
 }
