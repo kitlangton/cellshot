@@ -1093,6 +1093,52 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn capture_reports_a_deadline_instead_of_implying_idle() {
+        let mut session = Session::start(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "while :; do printf x; sleep 0.01; done".to_owned(),
+            ],
+            None,
+            None,
+            &Options::default(),
+        )
+        .unwrap();
+
+        let capture = session
+            .capture(Duration::from_secs(1), Duration::from_millis(50))
+            .unwrap();
+
+        assert_eq!(capture.reason, CaptureReason::Deadline);
+        session.stop().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_preserves_the_observed_process_exit() {
+        let mut session = Session::start(
+            &["sh".to_owned(), "-c".to_owned(), "exit 7".to_owned()],
+            None,
+            None,
+            &Options::default(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            let status = session.status().unwrap();
+            if status.state == SessionState::Exited {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "child did not exit");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(status.exit.unwrap().code, 7);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn recorded_session_rejects_resize_until_timelines_support_geometry_changes() {
         let record = std::env::temp_dir().join(format!(
             "cellshot-recorded-resize-test-{}.cellshot",

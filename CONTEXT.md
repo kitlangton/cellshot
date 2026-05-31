@@ -16,6 +16,10 @@ A named terminal application that remains available across waiting, input, resiz
 
 An embedded session owns the same live terminal lifecycle in-process; the named CLI session commands are an adapter for interacting with that lifecycle across invocations.
 
+### Driver
+
+A versioned JSON Lines stdin/stdout adapter over embedded sessions for external agent tooling. A driver process can manage multiple isolated sessions without exposing terminal process details to its client. Its shot response includes the reason capture completed so test clients can distinguish settled screen state from deadline fallback.
+
 ### Recording
 
 A timestamped terminal event timeline containing output plus client or automatic host input. A recording can be rendered to video and should be treated as potentially sensitive.

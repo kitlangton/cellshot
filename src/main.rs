@@ -1,10 +1,10 @@
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use cellshot::{recording, render, session, shot as shot_engine};
+use cellshot::{driver, recording, render, session, shot as shot_engine};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const HELP: &str = "\
@@ -113,6 +113,14 @@ Example:
   cellshot session stop demo
   cellshot video captures/demo.cellshot --out captures/demo.mp4";
 
+const DRIVER_HELP: &str = "\
+Driver mode serves isolated embedded sessions as newline-delimited JSON over standard input and
+standard output. It is intended for typed clients such as a future `@cellshot/test` package;
+standard output contains protocol messages only.
+
+Example:
+  cellshot driver";
+
 #[derive(Parser)]
 #[command(
     name = "cellshot",
@@ -140,6 +148,9 @@ enum Command {
     /// Export a video from a recorded persistent session.
     #[command(after_help = VIDEO_HELP)]
     Video(VideoArgs),
+    /// Serve isolated sessions for external testing clients.
+    #[command(after_help = DRIVER_HELP)]
+    Driver,
     #[command(name = "__serve", hide = true)]
     Serve(ServeArgs),
 }
@@ -494,6 +505,9 @@ fn main() -> Result<()> {
                     include_startup: args.include_startup,
                 },
             )?;
+        }
+        Command::Driver => {
+            driver::serve(BufReader::new(io::stdin().lock()), io::stdout().lock())?;
         }
         Command::Serve(args) => {
             session::serve(

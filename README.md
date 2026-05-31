@@ -173,7 +173,8 @@ session.wait_for_text("Ready", Duration::from_secs(5))?;
 let status = session.status()?;
 session.send(b"help\r")?;
 session.wait_for_idle(Duration::from_millis(250), Duration::from_secs(5))?;
-let shot = session.shot(Duration::from_millis(250), Duration::from_secs(5))?;
+let capture = session.capture(Duration::from_millis(250), Duration::from_secs(5))?;
+let shot = capture.shot;
 session.stop()?;
 ```
 
@@ -184,6 +185,26 @@ Structured output is versioned for external tools:
 - Recording byte arrays contain the original terminal or input bytes as integers from `0` to `255`; recordings can contain sensitive text or input.
 
 `session::Session` is the embedded lifecycle interface; the named CLI session commands are an adapter over the same implementation. This is also the intended seam for a future long-lived TypeScript driver process.
+
+## External Driver
+
+External agent tooling can keep multiple embedded sessions alive through a versioned JSON Lines protocol over stdin/stdout:
+
+```bash
+cellshot driver
+```
+
+The driver writes a `hello` message with protocol and cellshot versions, then accepts typed operations including `launch`, `status`, `send`, `waitForText`, `waitForIdle`, `shot`, `history`, `resize`, `stop`, and `shutdown`. It is intended for clients such as a TypeScript TUI test or agent-control library, while the shell-facing `session` commands remain convenient for individual workflows.
+
+```json
+{"type":"hello","protocolVersion":1,"cellshotVersion":"<installed-version>"}
+{"id":1,"method":"launch","sessionId":"app","params":{"command":["my-terminal-app"],"cols":100,"rows":30}}
+{"id":2,"method":"waitForText","sessionId":"app","params":{"text":"Ready","timeoutMs":5000}}
+{"id":3,"method":"send","sessionId":"app","params":{"input":[{"type":"text","value":"help"},{"type":"key","value":"enter"}]}}
+{"id":4,"method":"shot","sessionId":"app","params":{"settleMs":250,"deadlineMs":5000}}
+```
+
+A driver `shot` response contains a structured `Shot` and a capture `reason`: `idle`, `deadline`, `exited`, or `outputclosed`. A test client should normally require `idle` or `exited` instead of accepting a deadline fallback as a stable snapshot. Driver input is intentionally exact: text, raw bytes, known key values, and single-letter control input are supported without claiming unimplemented key chords.
 
 ## Notes
 

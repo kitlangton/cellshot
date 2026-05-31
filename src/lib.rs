@@ -9,6 +9,7 @@
 //! assert_eq!(shot.frame.text(), "ready");
 //! ```
 
+pub mod driver;
 pub mod frame;
 pub mod recording;
 pub mod render;
