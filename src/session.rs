@@ -28,7 +28,7 @@ struct Output {
 ///
 /// `Session` is the embedded equivalent of the CLI `session` lifecycle. It owns a PTY and the
 /// visible terminal state, so callers can send input, wait for content, take shots, and resize
-/// without spawning a new `cellshot` command for each action.
+/// without spawning a new `termctrl` command for each action.
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
@@ -835,10 +835,10 @@ mod implementation {
         }
     }
     pub fn runtime_dir() -> Result<PathBuf> {
-        let path = std::env::var_os("CELLSHOT_RUNTIME_DIR")
+        let path = std::env::var_os("TERMCTRL_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(format!("/tmp/cellshot-{}", unsafe { libc::geteuid() }))
+                PathBuf::from(format!("/tmp/termctrl-{}", unsafe { libc::geteuid() }))
             });
         match fs::symlink_metadata(&path) {
             Ok(metadata) => require_private_runtime_dir(&path, &metadata)?,
@@ -939,7 +939,7 @@ mod implementation {
             }
         }
         let mut daemon =
-            Command::new(std::env::current_exe().context("locate cellshot executable")?);
+            Command::new(std::env::current_exe().context("locate termctrl executable")?);
         daemon
             .arg("__serve")
             .arg("--socket")
@@ -1083,7 +1083,7 @@ mod implementation {
     fn ensure_socket_path(path: &Path) -> Result<()> {
         if path.as_os_str().as_encoded_bytes().len() >= 100 {
             bail!(
-                "session socket path is too long for portable Unix sockets: {}; set CELLSHOT_RUNTIME_DIR to a shorter directory",
+                "session socket path is too long for portable Unix sockets: {}; set TERMCTRL_RUNTIME_DIR to a shorter directory",
                 path.display()
             );
         }
@@ -1225,7 +1225,7 @@ mod implementation {
         #[test]
         fn name_start_lock_rejects_a_concurrent_owner() {
             let path = std::env::temp_dir().join(format!(
-                "cellshot-start-lock-test-{}.lock",
+                "termctrl-start-lock-test-{}.lock",
                 std::process::id()
             ));
             let held = StartLock::acquire(&path).unwrap();
@@ -1425,7 +1425,7 @@ mod tests {
     #[test]
     fn recorded_session_encodes_resize_in_its_timeline() {
         let record = std::env::temp_dir().join(format!(
-            "cellshot-recorded-resize-test-{}.cellshot",
+            "termctrl-recorded-resize-test-{}.termctrl",
             std::process::id()
         ));
         let mut session = Session::start(
@@ -1510,7 +1510,7 @@ mod tests {
     #[test]
     fn stopping_after_pty_eof_terminates_still_running_process() {
         let pid_path = std::env::temp_dir().join(format!(
-            "cellshot-pty-eof-owner-test-{}.pid",
+            "termctrl-pty-eof-owner-test-{}.pid",
             std::process::id()
         ));
         let script = format!(
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn natural_parent_exit_terminates_pty_holding_descendants() {
         let pid_path = std::env::temp_dir().join(format!(
-            "cellshot-exited-owner-test-{}.pid",
+            "termctrl-exited-owner-test-{}.pid",
             std::process::id()
         ));
         let script = format!(
@@ -1576,12 +1576,12 @@ mod tests {
     #[test]
     fn daemon_start_failure_removes_bound_socket() {
         let socket = std::env::temp_dir().join(format!(
-            "cellshot-failed-daemon-start-{}.sock",
+            "termctrl-failed-daemon-start-{}.sock",
             std::process::id()
         ));
         let result = serve(
             socket.clone(),
-            vec!["/definitely/not/a/cellshot-command".to_owned()],
+            vec!["/definitely/not/a/termctrl-command".to_owned()],
             None,
             None,
             Options::default(),

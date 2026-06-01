@@ -1,14 +1,14 @@
 {
-  "name": "@cellshot/darwin-x64",
+  "name": "@kitlangton/terminal-control-darwin-x64",
   "version": "0.1.0",
-  "description": "Native cellshot binary for macOS x64",
+  "description": "Native termctrl binary for Terminal Control on macOS x64",
   "license": "MIT",
-  "repository": "https://github.com/kitlangton/cellshot",
+  "repository": "https://github.com/kitlangton/terminal-control",
   "os": ["darwin"],
   "cpu": ["x64"],
-  "files": ["bin/cellshot", "README.md", "LICENSE"],
+  "files": ["bin/termctrl", "README.md", "LICENSE"],
   "bin": {
-    "cellshot": "bin/cellshot"
+    "termctrl": "bin/termctrl"
   },
   "publishConfig": {
     "access": "public"

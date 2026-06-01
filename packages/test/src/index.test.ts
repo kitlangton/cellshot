@@ -3,18 +3,18 @@ import { mkdtemp, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
-import { createCellshot, IncompleteCaptureError, resolveCellshotBinary, type Cellshot } from "./index"
-import { cellshotMatchers } from "./vitest"
+import { IncompleteCaptureError, resolveTerminalControlBinary, TerminalControl } from "./index"
+import { terminalControlMatchers } from "./vitest"
 
-const binaryPath = process.env.CELLSHOT_TEST_BINARY ?? resolve(import.meta.dir, "../../../target/debug/cellshot")
-let cellshot: Cellshot
+const binaryPath = process.env.TERMCTRL_TEST_BINARY ?? resolve(import.meta.dir, "../../../target/debug/termctrl")
+let terminal: TerminalControl
 
 beforeAll(async () => {
-  cellshot = await createCellshot({ binaryPath })
+  terminal = await TerminalControl.make({ binaryPath })
 })
 
 afterAll(async () => {
-  await cellshot.close()
+  await terminal.close()
 })
 
 describe("isolated terminal sessions", () => {
@@ -29,11 +29,11 @@ describe("isolated terminal sessions", () => {
   })
 
   test("prefers an explicitly configured native binary", () => {
-    expect(resolveCellshotBinary(binaryPath)).toBe(binaryPath)
+    expect(resolveTerminalControlBinary(binaryPath)).toBe(binaryPath)
   })
 
   test("drives a visible screen through typed keyboard operations", async () => {
-    await using session = await cellshot.launch({
+    await using session = await terminal.launch({
       command: [
         "sh",
         "-c",
@@ -59,7 +59,7 @@ describe("isolated terminal sessions", () => {
   })
 
   test("exposes current screen separately from logs", async () => {
-    await using session = await cellshot.launch({
+    await using session = await terminal.launch({
       command: ["sh", "-c", "printf 'one\\r\\ntwo\\r\\nthree\\r\\nfour\\r\\nfive\\r\\n'; sleep 1"],
       viewport: { cols: 20, rows: 2 },
     })
@@ -71,7 +71,7 @@ describe("isolated terminal sessions", () => {
   })
 
   test("refuses to treat a deadline capture as stable by default", async () => {
-    await using session = await cellshot.launch({
+    await using session = await terminal.launch({
       command: ["sh", "-c", "while :; do printf x; sleep 0.01; done"],
     })
 
@@ -88,7 +88,7 @@ describe("isolated terminal sessions", () => {
   })
 
   test("reports a completed command status and exit code", async () => {
-    await using session = await cellshot.launch({ command: ["sh", "-c", "exit 7"] })
+    await using session = await terminal.launch({ command: ["sh", "-c", "exit 7"] })
     const result = await session.waitForExit({ timeoutMs: 2_000 })
     const status = await session.status()
 
@@ -98,7 +98,7 @@ describe("isolated terminal sessions", () => {
   })
 
   test("accepts implemented control chords as typed key strings", async () => {
-    await using session = await cellshot.launch({
+    await using session = await terminal.launch({
       command: [
         "sh",
         "-c",
@@ -113,12 +113,12 @@ describe("isolated terminal sessions", () => {
   })
 
   test("supports isolated application environments", async () => {
-    await using isolated = await createCellshot({
+    await using isolated = await TerminalControl.make({
       binaryPath,
-      env: { CELLSHOT_PARENT_ONLY: "leak" },
+      env: { TERMCTRL_PARENT_ONLY: "leak" },
     })
     await using session = await isolated.launch({
-      command: ["/bin/sh", "-c", "printf '%s:%s' \"${CELLSHOT_PARENT_ONLY-unset}\" \"$VISIBLE\""],
+      command: ["/bin/sh", "-c", "printf '%s:%s' \"${TERMCTRL_PARENT_ONLY-unset}\" \"$VISIBLE\""],
       inheritEnv: false,
       env: { VISIBLE: "set" },
     })
@@ -127,7 +127,7 @@ describe("isolated terminal sessions", () => {
   })
 
   test("waits for regular expressions and client predicates", async () => {
-    await using session = await cellshot.launch({
+    await using session = await terminal.launch({
       command: ["sh", "-c", "printf 'saved 12 files'; sleep 1"],
     })
 
@@ -137,9 +137,9 @@ describe("isolated terminal sessions", () => {
   })
 
   test("records resized sessions and saves their timelines", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "cellshot-recording-test-"))
-    const path = join(directory, "resize.cellshot")
-    await using session = await cellshot.launch({
+    const directory = await mkdtemp(join(tmpdir(), "termctrl-recording-test-"))
+    const path = join(directory, "resize.termctrl")
+    await using session = await terminal.launch({
       command: ["sh", "-c", "printf ready; sleep 1"],
       record: true,
     })
@@ -152,8 +152,8 @@ describe("isolated terminal sessions", () => {
   })
 
   test("writes explicit failure artifacts with snapshot and recording evidence", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "cellshot-artifacts-test-"))
-    await using reporting = await createCellshot({
+    const directory = await mkdtemp(join(tmpdir(), "termctrl-artifacts-test-"))
+    await using reporting = await TerminalControl.make({
       binaryPath,
       artifacts: { directory, includeTranscript: true, includeRecording: true },
     })
@@ -164,19 +164,19 @@ describe("isolated terminal sessions", () => {
     })
     await session.screen.waitForText("evidence", { timeoutMs: 2_000 })
 
-    const result = await cellshotMatchers.toHaveScreenText(session, "different")
+    const result = await terminalControlMatchers.toHaveScreenText(session, "different")
     expect(result.pass).toBe(false)
     expect(await readFile(join(directory, "screen-text", "screen.txt"), "utf8")).toBe("evidence")
     expect((await readFile(join(directory, "screen-text", "screen.svg"), "utf8")).startsWith("<svg")).toBe(true)
     expect(await readFile(join(directory, "screen-text", "transcript.ansi"), "utf8")).toContain("evidence")
-    expect(await readFile(join(directory, "screen-text", "recording.cellshot"), "utf8")).toContain("output")
+    expect(await readFile(join(directory, "screen-text", "recording.termctrl"), "utf8")).toContain("output")
     const metadata = await readFile(join(directory, "screen-text", "metadata.json"), "utf8")
     expect(metadata).toContain('"API_TOKEN": "[redacted]"')
     expect(metadata).not.toContain("sensitive")
   })
 
   test("drives an alternate-screen terminal workflow and snapshots its selected view", async () => {
-    await using session = await cellshot.launch({
+    await using session = await terminal.launch({
       command: [
         "bash",
         "-c",

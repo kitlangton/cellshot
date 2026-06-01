@@ -550,7 +550,7 @@ impl Host {
         {
             response.extend_from_slice(
                 format!(
-                        "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\\x1bP>|cellshot {}\x1b\\\x1b[1;1R\x1b[?1016;0$y\x1b[?2027;0$y\x1b[?2031;2$y\x1b[?1004;1$y\x1b[?2004;2$y\x1b[?2026;2$y\x1b[?0u\x1b[1;1R\x1b[1;1R\x1b[4;{};{}t\x1b[?6c",
+                        "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\\x1bP>|termctrl {}\x1b\\\x1b[1;1R\x1b[?1016;0$y\x1b[?2027;0$y\x1b[?2031;2$y\x1b[?1004;1$y\x1b[?2004;2$y\x1b[?2026;2$y\x1b[?0u\x1b[1;1R\x1b[1;1R\x1b[4;{};{}t\x1b[?6c",
                         DEFAULT_FOREGROUND.r,
                         DEFAULT_FOREGROUND.r,
                         DEFAULT_FOREGROUND.g,

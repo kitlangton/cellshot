@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join, resolve } from "node:path"
-import { nativePackage, pack, packNativePackage, run, runtimeTargets } from "./native-packages.mjs"
+import { nativePackage, nativePackages, pack, packNativePackage, run, runtimeTargets } from "./native-packages.mjs"
 
 const repository = resolve(import.meta.dirname, "..")
 const packaged = process.argv[2] === "--tarballs"
@@ -9,7 +9,7 @@ const target = packaged ? process.argv[4] : runtimeTargets[`${process.platform}-
 if (!target) throw new Error(`cannot validate native npm package for ${process.platform}-${process.arch}`)
 const native = nativePackage(target)
 
-const temp = await mkdtemp(join(tmpdir(), "cellshot-npm-validation-"))
+const temp = await mkdtemp(join(tmpdir(), "termctrl-npm-validation-"))
 try {
   const { clientTarball, nativeTarball } = await inputTarballs(temp)
   verifyDependencyVersion(clientTarball, nativeTarball)
@@ -18,7 +18,7 @@ try {
   await validateNodeConsumer(join(temp, "node-consumer"), installableClient)
   console.log(`validated ${basename(clientTarball)} with automatic ${basename(nativeTarball)} install`)
 } finally {
-  if (!process.env.CELLSHOT_KEEP_NPM_VALIDATION_TEMP) {
+  if (!process.env.TERMCTRL_KEEP_NPM_VALIDATION_TEMP) {
     await rm(temp, { recursive: true, force: true })
   }
 }
@@ -41,8 +41,8 @@ async function inputTarballs(temp) {
     const tarballs = resolve(process.argv[3])
     const files = await readdir(tarballs)
     return {
-      nativeTarball: join(tarballs, required(files, `cellshot-${target}-`)),
-      clientTarball: join(tarballs, required(files, "cellshot-test-")),
+      nativeTarball: join(tarballs, required(files, `kitlangton-terminal-control-${target}-`)),
+      clientTarball: join(tarballs, requiredClient(files)),
     }
   }
   const tarballs = join(temp, "tarballs")
@@ -50,7 +50,7 @@ async function inputTarballs(temp) {
   return {
     nativeTarball: await packNativePackage(
       target,
-      resolve(process.argv[2] ?? join(repository, "target/release/cellshot")),
+      resolve(process.argv[2] ?? join(repository, "target/release/termctrl")),
       tarballs,
     ),
     clientTarball: pack(join(repository, "packages/test"), tarballs),
@@ -80,16 +80,25 @@ function required(files, prefix) {
   return matches[0]
 }
 
+function requiredClient(files) {
+  const nativePrefixes = nativePackages.map(({ target }) => `kitlangton-terminal-control-${target}-`)
+  const matches = files.filter((file) => file.startsWith("kitlangton-terminal-control-")
+    && file.endsWith(".tgz")
+    && !nativePrefixes.some((prefix) => file.startsWith(prefix)))
+  if (matches.length !== 1) throw new Error(`expected one Terminal Control client tarball, found ${matches.length}`)
+  return matches[0]
+}
+
 async function validateBunConsumer(directory, client) {
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, "package.json"), JSON.stringify({
     private: true,
     type: "module",
     dependencies: {
-      "@cellshot/test": `file:${client}`,
+      "@kitlangton/terminal-control": `file:${client}`,
     },
   }, null, 2))
-  await writeFile(join(directory, "client.test.ts"), `import { expect, test } from "bun:test"\nimport { createCellshot } from "@cellshot/test"\ntest("resolves the installed native binary", async () => {\n  await using client = await createCellshot()\n  await using session = await client.launch({ command: ["sh", "-c", "printf bun-packed"] })\n  expect(await session.screen.text({ settleMs: 10, deadlineMs: 2_000 })).toBe("bun-packed")\n})\n`)
+  await writeFile(join(directory, "client.test.ts"), `import { expect, test } from "bun:test"\nimport { TerminalControl } from "@kitlangton/terminal-control"\ntest("resolves the installed native binary", async () => {\n  await using client = await TerminalControl.make()\n  await using session = await client.launch({ command: ["sh", "-c", "printf bun-packed"] })\n  expect(await session.screen.text({ settleMs: 10, deadlineMs: 2_000 })).toBe("bun-packed")\n})\n`)
   run("bun", ["install"], directory)
   run("bun", ["test", "client.test.ts"], directory)
 }
@@ -101,7 +110,7 @@ async function validateNodeConsumer(directory, client) {
     type: "module",
     scripts: { test: "vitest run" },
     dependencies: {
-      "@cellshot/test": `file:${client}`,
+      "@kitlangton/terminal-control": `file:${client}`,
       "@types/node": "^24.0.0",
       typescript: "^5.9.0",
       vitest: "^3.2.4",
@@ -118,7 +127,7 @@ async function validateNodeConsumer(directory, client) {
       types: ["node", "vitest"],
     },
   }, null, 2))
-  await writeFile(join(directory, "client.test.ts"), `import { describe, expect, test } from "vitest"\nimport { createCellshot } from "@cellshot/test"\nimport { extendCellshotMatchers } from "@cellshot/test/vitest"\nextendCellshotMatchers(expect)\ndescribe("published package", () => {\n  test("resolves native binary and matcher", async () => {\n    await using client = await createCellshot()\n    await using session = await client.launch({ command: ["sh", "-c", "printf node-packed"] })\n    await expect(session).toHaveScreenText("node-packed")\n  })\n})\n`)
+  await writeFile(join(directory, "client.test.ts"), `import { describe, expect, test } from "vitest"\nimport { TerminalControl } from "@kitlangton/terminal-control"\nimport { extendTerminalControlMatchers } from "@kitlangton/terminal-control/vitest"\nextendTerminalControlMatchers(expect)\ndescribe("published package", () => {\n  test("resolves native binary and matcher", async () => {\n    await using client = await TerminalControl.make()\n    await using session = await client.launch({ command: ["sh", "-c", "printf node-packed"] })\n    await expect(session).toHaveScreenText("node-packed")\n  })\n})\n`)
   run("npm", ["install", "--ignore-scripts"], directory)
   run("npm", ["exec", "--", "tsc", "--noEmit"], directory)
   run("npm", ["test"], directory)

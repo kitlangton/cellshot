@@ -1,3 +1,3 @@
-# @cellshot/linux-arm64-gnu
+# @kitlangton/terminal-control-linux-arm64-gnu
 
-Native Linux arm64 GNU binary installed automatically by `@cellshot/test`.
+Native Linux arm64 GNU `termctrl` binary installed automatically by `@kitlangton/terminal-control`.

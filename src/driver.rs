@@ -17,7 +17,7 @@ use crate::render;
 use crate::session::Session;
 use crate::shot::{ColorMode, Options};
 
-/// Current JSON Lines protocol version spoken by `cellshot driver`.
+/// Current JSON Lines protocol version spoken by `termctrl driver`.
 pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Serve isolated embedded sessions over newline-delimited JSON requests and responses.
@@ -30,7 +30,7 @@ pub fn serve(reader: impl BufRead, mut writer: impl Write) -> Result<()> {
         &json!({
             "type": "hello",
             "protocolVersion": PROTOCOL_VERSION,
-            "cellshotVersion": env!("CARGO_PKG_VERSION")
+            "terminalControlVersion": env!("CARGO_PKG_VERSION")
         }),
     )?;
     let mut sessions = HashMap::<String, ManagedSession>::new();
@@ -630,9 +630,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn driver_launch_can_clear_and_supply_environment() {
-        unsafe { std::env::set_var("CELLSHOT_PARENT_ONLY", "leak") };
+        unsafe { std::env::set_var("TERMCTRL_PARENT_ONLY", "leak") };
         let requests = concat!(
-            r#"{"id":1,"method":"launch","sessionId":"app","params":{"command":["/bin/sh","-c","printf '%s:%s' \"${CELLSHOT_PARENT_ONLY-unset}\" \"$VISIBLE\""],"inheritEnv":false,"env":{"VISIBLE":"set"}}}"#,
+            r#"{"id":1,"method":"launch","sessionId":"app","params":{"command":["/bin/sh","-c","printf '%s:%s' \"${TERMCTRL_PARENT_ONLY-unset}\" \"$VISIBLE\""],"inheritEnv":false,"env":{"VISIBLE":"set"}}}"#,
             "\n",
             r#"{"id":2,"method":"capture","sessionId":"app","params":{"settleMs":10,"deadlineMs":2000}}"#,
             "\n",
@@ -645,7 +645,7 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        unsafe { std::env::remove_var("CELLSHOT_PARENT_ONLY") };
+        unsafe { std::env::remove_var("TERMCTRL_PARENT_ONLY") };
 
         let messages = String::from_utf8(output)
             .unwrap()
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn idle_driver_continues_pumping_verbose_sessions() {
         let marker =
-            std::env::temp_dir().join(format!("cellshot-driver-pump-{}", std::process::id()));
+            std::env::temp_dir().join(format!("termctrl-driver-pump-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let (mut requests, input) = UnixStream::pair().unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));

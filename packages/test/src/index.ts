@@ -210,7 +210,7 @@ type InputAtom =
 type ProtocolHello = {
   type: "hello"
   protocolVersion: number
-  cellshotVersion: string
+  terminalControlVersion: string
 }
 
 type ProtocolResponse = {
@@ -235,12 +235,12 @@ type Pending = {
 
 type DriverRequest = <T>(method: string, params?: unknown, sessionId?: string) => Promise<T>
 
-export class CellshotError extends Error {
+export class TerminalControlError extends Error {
   readonly code: string
 
   constructor(code: string, message: string) {
     super(message)
-    this.name = "CellshotError"
+    this.name = "TerminalControlError"
     this.code = code
   }
 }
@@ -256,32 +256,28 @@ export class IncompleteCaptureError extends Error {
 }
 
 const nativePackages: Record<string, string> = {
-  "darwin-arm64": "@cellshot/darwin-arm64",
-  "darwin-x64": "@cellshot/darwin-x64",
-  "linux-arm64": "@cellshot/linux-arm64-gnu",
-  "linux-x64": "@cellshot/linux-x64-gnu",
+  "darwin-arm64": "@kitlangton/terminal-control-darwin-arm64",
+  "darwin-x64": "@kitlangton/terminal-control-darwin-x64",
+  "linux-arm64": "@kitlangton/terminal-control-linux-arm64-gnu",
+  "linux-x64": "@kitlangton/terminal-control-linux-x64-gnu",
 }
 
-export function resolveCellshotBinary(explicit?: string): string {
+export function resolveTerminalControlBinary(explicit?: string): string {
   if (explicit) return explicit
-  if (process.env.CELLSHOT_BINARY) return process.env.CELLSHOT_BINARY
+  if (process.env.TERMCTRL_BINARY) return process.env.TERMCTRL_BINARY
   const target = `${process.platform}-${process.arch}`
   const packageName = nativePackages[target]
   if (!packageName) {
-    throw new Error(`no packaged cellshot binary is available for ${target}; provide binaryPath`)
+    throw new Error(`no packaged termctrl binary is available for ${target}; provide binaryPath`)
   }
   try {
-    return createRequire(import.meta.url).resolve(`${packageName}/bin/cellshot`)
+    return createRequire(import.meta.url).resolve(`${packageName}/bin/termctrl`)
   } catch {
-    throw new Error(`cellshot native package ${packageName} is not installed; provide binaryPath`)
+    throw new Error(`termctrl native package ${packageName} is not installed; provide binaryPath`)
   }
 }
 
-export async function createCellshot(options: DriverOptions = {}): Promise<Cellshot> {
-  return Cellshot.start(options)
-}
-
-export class Cellshot implements AsyncDisposable {
+export class TerminalControl implements AsyncDisposable {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<number, Pending>()
   private readonly ready: Promise<ProtocolHello>
@@ -295,7 +291,7 @@ export class Cellshot implements AsyncDisposable {
 
   private constructor(options: DriverOptions) {
     this.artifacts = options.artifacts ?? false
-    this.child = spawn(resolveCellshotBinary(options.binaryPath), ["driver"], {
+    this.child = spawn(resolveTerminalControlBinary(options.binaryPath), ["driver"], {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       stdio: "pipe",
@@ -308,16 +304,16 @@ export class Cellshot implements AsyncDisposable {
         try {
           message = JSON.parse(line) as ProtocolHello | ProtocolResponse | ProtocolFailure
         } catch (error) {
-          this.abort(new Error(`invalid cellshot driver response: ${String(error)}`))
+          this.abort(new Error(`invalid termctrl driver response: ${String(error)}`))
           return
         }
         if (message.type === "hello") {
           if (this.readySettled) {
-            this.abort(new Error("cellshot driver sent more than one hello message"))
+            this.abort(new Error("termctrl driver sent more than one hello message"))
             return
           }
           if (message.protocolVersion !== 1) {
-            this.abort(new Error(`unsupported cellshot protocol version ${message.protocolVersion}`))
+            this.abort(new Error(`unsupported termctrl protocol version ${message.protocolVersion}`))
             return
           }
           this.readySettled = true
@@ -326,13 +322,13 @@ export class Cellshot implements AsyncDisposable {
         }
         if (message.type === "error") {
           if (message.id === null) {
-            this.abort(new CellshotError(message.error.code, message.error.message))
+            this.abort(new TerminalControlError(message.error.code, message.error.message))
             return
           }
           const pending = this.pending.get(message.id)
           if (!pending) return
           this.pending.delete(message.id)
-          pending.reject(new CellshotError(message.error.code, message.error.message))
+          pending.reject(new TerminalControlError(message.error.code, message.error.message))
           return
         }
         const pending = this.pending.get(message.id)
@@ -349,14 +345,14 @@ export class Cellshot implements AsyncDisposable {
       if (this.closed) return
       const detail = this.stderr.trim()
       const error = new Error(
-        `cellshot driver exited (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`,
+        `termctrl driver exited (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`,
       )
       this.abort(error)
     })
   }
 
-  static async start(options: DriverOptions): Promise<Cellshot> {
-    const client = new Cellshot(options)
+  static async make(options: DriverOptions = {}): Promise<TerminalControl> {
+    const client = new TerminalControl(options)
     await client.ready
     return client
   }
@@ -364,7 +360,7 @@ export class Cellshot implements AsyncDisposable {
   async launch(options: LaunchOptions): Promise<Session> {
     const sessionId = `session-${this.nextSessionId++}`
     const temporaryRecording = options.record === true || options.record === "on-failure"
-      ? join(tmpdir(), `cellshot-${process.pid}-${randomUUID()}.cellshot`)
+      ? join(tmpdir(), `termctrl-${process.pid}-${randomUUID()}.termctrl`)
       : undefined
     const record = temporaryRecording ?? options.record
     await this.request("launch", {
@@ -403,7 +399,7 @@ export class Cellshot implements AsyncDisposable {
 
   private async request<T>(method: string, params?: unknown, sessionId?: string): Promise<T> {
     await this.ready
-    if (this.closed) throw new Error("cellshot driver is closed")
+    if (this.closed) throw new Error("termctrl driver is closed")
     const id = this.nextRequestId++
     const result = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
@@ -500,7 +496,7 @@ export class Session implements AsyncDisposable {
   }
 
   async writeArtifacts(name = this.id): Promise<ArtifactManifest> {
-    if (!this.artifacts) throw new Error("configure Cellshot artifacts before writing failure evidence")
+    if (!this.artifacts) throw new Error("configure Terminal Control artifacts before writing failure evidence")
     const directory = join(this.artifacts.directory, artifactName(name))
     const includeTranscript = this.artifacts.includeTranscript === true
     const capture = await this.screen.capture({
@@ -536,7 +532,7 @@ export class Session implements AsyncDisposable {
       await writeFile(manifest.transcript, capture.ansi)
     }
     if (this.artifacts.includeRecording && status.recording) {
-      manifest.recording = join(directory, "recording.cellshot")
+      manifest.recording = join(directory, "recording.termctrl")
       await writeFile(manifest.recording, await this.recording())
     }
     return manifest

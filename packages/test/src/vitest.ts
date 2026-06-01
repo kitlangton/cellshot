@@ -10,12 +10,12 @@ type MatcherRegistry = {
   extend(matchers: Record<string, (received: unknown, expected: string) => Promise<MatcherResult>>): void
 }
 
-export const cellshotMatchers = {
+export const terminalControlMatchers = {
   async toHaveScreenText(received: unknown, expected: string): Promise<MatcherResult> {
     if (!(received instanceof Session) && !(received instanceof Screen)) {
       return {
         pass: false,
-        message: () => "toHaveScreenText expects a Cellshot Session or Screen",
+        message: () => "toHaveScreenText expects a Terminal Control Session or Screen",
       }
     }
     const screen = received instanceof Session ? received.screen : received
@@ -43,8 +43,8 @@ export const cellshotMatchers = {
   },
 }
 
-export function extendCellshotMatchers(expect: MatcherRegistry): void {
-  expect.extend(cellshotMatchers)
+export function extendTerminalControlMatchers(expect: MatcherRegistry): void {
+  expect.extend(terminalControlMatchers)
 }
 
 declare module "vitest" {

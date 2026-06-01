@@ -1,15 +1,20 @@
 [package]
-name = "cellshot"
-version = "0.7.0"
+name = "terminal-control"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
-description = "Export terminal shots as styled, reviewable visual artifacts"
+description = "Control and test terminal applications through stable visible state"
 license = "MIT"
-repository = "https://github.com/kitlangton/cellshot"
+repository = "https://github.com/kitlangton/terminal-control"
 readme = "README.md"
-keywords = ["terminal", "tui", "screenshot", "automation", "ansi"]
+keywords = ["terminal", "tui", "testing", "automation", "ansi"]
 categories = ["command-line-utilities", "development-tools::testing"]
 include = ["/src/**", "/schemas/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+autobins = false
+
+[[bin]]
+name = "termctrl"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

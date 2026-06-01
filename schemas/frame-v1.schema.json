@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/kitlangton/cellshot/schemas/frame-v1.schema.json",
-  "title": "cellshot structured terminal frame v1",
+  "$id": "https://github.com/kitlangton/terminal-control/schemas/frame-v1.schema.json",
+  "title": "Terminal Control structured terminal frame v1",
   "type": "object",
   "required": ["version", "cols", "rows", "foreground", "background", "cursor", "cells"],
   "additionalProperties": false,

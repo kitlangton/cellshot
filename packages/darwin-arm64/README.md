@@ -1,3 +1,3 @@
-# @cellshot/darwin-arm64
+# @kitlangton/terminal-control-darwin-arm64
 
-Native macOS arm64 binary installed automatically by `@cellshot/test`.
+Native macOS arm64 `termctrl` binary installed automatically by `@kitlangton/terminal-control`.

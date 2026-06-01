@@ -4,33 +4,33 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use cellshot::{driver, recording, render, session, shot as shot_engine};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use terminal_control::{driver, recording, render, session, shot as shot_engine};
 
 const HELP: &str = "\
-cellshot controls and captures terminal applications for agents and tests. Start a named live
+termctrl controls and captures terminal applications for agents and tests. Start a named live
 application, read its visible screen with `show`, or retain selected artifacts with `save`.";
 
 const ROOT_EXAMPLES: &str = "\
 Examples:
-  cellshot show -- my-terminal-app
-  cellshot save --format png --out captures/app.png -- my-terminal-app
-  cellshot start demo --host opentui -- opencode
-  cellshot wait demo '/connect' && cellshot send demo text:/connect enter
-  cellshot show demo
-  cellshot save demo --format png --out captures/provider.png
-  cellshot logs demo
-  cellshot restart demo
-  cellshot stop demo";
+  termctrl show -- my-terminal-app
+  termctrl save --format png --out captures/app.png -- my-terminal-app
+  termctrl start demo --host opentui -- opencode
+  termctrl wait demo '/connect' && termctrl send demo text:/connect enter
+  termctrl show demo
+  termctrl save demo --format png --out captures/provider.png
+  termctrl logs demo
+  termctrl restart demo
+  termctrl stop demo";
 
 const SHOW_HELP: &str = "\
 Show prints a settled visible terminal screen to standard output, as text by default.
 
 Sources:
-  cellshot show NAME                    Read a named live session.
-  cellshot show -- COMMAND...           Run a disposable command in a PTY.
-  cellshot show --pipe -- COMMAND...    Read piped stdout/stderr.
-  cellshot show --input FILE            Read ANSI/VT bytes from FILE, or use - for stdin.
+  termctrl show NAME                    Read a named live session.
+  termctrl show -- COMMAND...           Run a disposable command in a PTY.
+  termctrl show --pipe -- COMMAND...    Read piped stdout/stderr.
+  termctrl show --input FILE            Read ANSI/VT bytes from FILE, or use - for stdin.
 
 Use --format json, --format ansi, or --format svg for another stdout-readable representation.
 Use `save` to write files.";
@@ -39,27 +39,27 @@ const SAVE_HELP: &str = "\
 Save freezes a visible terminal screen and writes exactly the requested artifact formats.
 
 Examples:
-  cellshot save demo --format png --out captures/current.png
-  cellshot save demo --format png --format txt --out captures/current
-  cellshot save --input debug.ansi --format png --out captures/replay.png
-  cellshot save --format png --out captures/startup.png -- my-terminal-app";
+  termctrl save demo --format png --out captures/current.png
+  termctrl save demo --format png --format txt --out captures/current
+  termctrl save --input debug.ansi --format png --out captures/replay.png
+  termctrl save --format png --out captures/startup.png -- my-terminal-app";
 
 const START_HELP: &str = "\
 Start creates one background PTY session and returns once its local control socket is available.
-The application stays alive until `cellshot stop NAME`, so later commands interact with the
+The application stays alive until `termctrl stop NAME`, so later commands interact with the
 same screen and application state. Persistent sessions currently require macOS or Linux. Session
 sockets are local control endpoints protected for the current user; recordings contain terminal
 output plus client and automatic host input, so treat them as sensitive artifacts.
 
 Example:
-  cellshot start demo --host opentui --cols 112 --rows 34 -- opencode
-  cellshot status demo
-  cellshot wait demo '/connect'
-  cellshot send demo text:/connect enter
-  cellshot resize demo --cols 132 --rows 38
-  cellshot show demo
-  cellshot save demo --format png --out captures/provider.png
-  cellshot stop demo";
+  termctrl start demo --host opentui --cols 112 --rows 34 -- opencode
+  termctrl status demo
+  termctrl wait demo '/connect'
+  termctrl send demo text:/connect enter
+  termctrl resize demo --cols 132 --rows 38
+  termctrl show demo
+  termctrl save demo --format png --out captures/provider.png
+  termctrl stop demo";
 
 const SEND_HELP: &str = "\
 Send ordered input to a live session. Text uses `text:<value>`; named keys include `enter`,
@@ -70,37 +70,37 @@ character in the terminal instead of as one immediate paste. Use `--stdin` to se
 from standard input as one burst.
 
 Examples:
-  cellshot send demo ctrl-p text:model enter
-  cellshot send demo ctrl-c
-  printf '%s' 'a multiline prompt' | cellshot send demo --stdin
-  cellshot send demo --pace-ms 35 'text:Write a terminal haiku.' enter";
+  termctrl send demo ctrl-p text:model enter
+  termctrl send demo ctrl-c
+  printf '%s' 'a multiline prompt' | termctrl send demo --stdin
+  termctrl send demo --pace-ms 35 'text:Write a terminal haiku.' enter";
 
 const VIDEO_HELP: &str = "\
 Replay a recording produced by `session start --record` into a video artifact. Output is sampled at --fps and
 begins at the first visible terminal content while preserving real timing afterward. Pass
 --include-startup to include blank startup/negotiation frames or --max-idle-ms when you explicitly
-want to shorten long quiet gaps for a condensed edit. The source `.cellshot` file retains observed
+want to shorten long quiet gaps for a condensed edit. The source `.termctrl` file retains observed
 timing, terminal bytes, client input, and automatic host input until the session is closed.
 Video export requires `ffmpeg` to be installed.
 
 Example:
-  cellshot start demo --record captures/demo.cellshot -- opencode
-  cellshot send demo text:/connect enter
-  cellshot stop demo
-  cellshot video captures/demo.cellshot --out captures/demo.mp4";
+  termctrl start demo --record captures/demo.termctrl -- opencode
+  termctrl send demo text:/connect enter
+  termctrl stop demo
+  termctrl video captures/demo.termctrl --out captures/demo.mp4";
 
 const DRIVER_HELP: &str = "\
 Driver mode serves isolated embedded sessions as newline-delimited JSON over standard input and
-standard output. It is used by the experimental `@cellshot/test` package; standard output
+standard output. It is used by the `@kitlangton/terminal-control` package; standard output
 contains protocol messages only. Driver sessions support isolated child environments, stable
 captures, SVG evidence, recordings, resizing, and explicit exit waiting.
 
 Example:
-  cellshot driver";
+  termctrl driver";
 
 #[derive(Parser)]
 #[command(
-    name = "cellshot",
+    name = "termctrl",
     version,
     about = "Control and capture terminal applications",
     long_about = HELP,
@@ -1017,7 +1017,7 @@ mod tests {
     #[test]
     fn parses_one_off_show_input_sequence() {
         let cli = Cli::try_parse_from([
-            "cellshot",
+            "termctrl",
             "show",
             "--wait-for",
             "ready",
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn parses_explicit_saved_formats_and_named_source() {
         let cli = Cli::try_parse_from([
-            "cellshot", "save", "demo", "--out", "capture", "--format", "png", "--format", "txt",
+            "termctrl", "save", "demo", "--out", "capture", "--format", "png", "--format", "txt",
         ])
         .unwrap();
         let Command::Save(args) = cli.command else {
@@ -1052,25 +1052,25 @@ mod tests {
 
     #[test]
     fn parses_flat_session_control_commands() {
-        assert!(Cli::try_parse_from(["cellshot", "status", "demo", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["termctrl", "status", "demo", "--json"]).is_ok());
         assert!(
             Cli::try_parse_from([
-                "cellshot", "resize", "demo", "--cols", "120", "--rows", "40"
+                "termctrl", "resize", "demo", "--cols", "120", "--rows", "40"
             ])
             .is_ok()
         );
-        assert!(Cli::try_parse_from(["cellshot", "send", "demo", "--stdin"]).is_ok());
-        assert!(Cli::try_parse_from(["cellshot", "logs", "demo", "--ansi"]).is_ok());
-        assert!(Cli::try_parse_from(["cellshot", "restart", "demo"]).is_ok());
+        assert!(Cli::try_parse_from(["termctrl", "send", "demo", "--stdin"]).is_ok());
+        assert!(Cli::try_parse_from(["termctrl", "logs", "demo", "--ansi"]).is_ok());
+        assert!(Cli::try_parse_from(["termctrl", "restart", "demo"]).is_ok());
         assert!(
-            Cli::try_parse_from(["cellshot", "wait", "demo", "ready", "--timeout", "5"]).is_ok()
+            Cli::try_parse_from(["termctrl", "wait", "demo", "ready", "--timeout", "5"]).is_ok()
         );
     }
 
     #[test]
     fn show_rejects_png_before_starting_a_source() {
         let cli =
-            Cli::try_parse_from(["cellshot", "show", "--format", "png", "--", "app"]).unwrap();
+            Cli::try_parse_from(["termctrl", "show", "--format", "png", "--", "app"]).unwrap();
         let Command::Show(args) = cli.command else {
             panic!("expected show command");
         };
@@ -1084,7 +1084,7 @@ mod tests {
     #[test]
     fn rejects_settling_options_for_pipe_reads() {
         let cli = Cli::try_parse_from([
-            "cellshot",
+            "termctrl",
             "show",
             "--pipe",
             "--settle-ms",

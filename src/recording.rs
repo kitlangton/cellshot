@@ -11,10 +11,10 @@ use crate::frame::{Frame, from_screen};
 use crate::render;
 
 const MAX_VIDEO_FPS: u32 = 1000;
-/// Schema version written in the header of every `.cellshot` recording.
+/// Schema version written in the header of every `.termctrl` recording.
 pub const FORMAT_VERSION: u8 = 1;
 
-/// One JSON Lines entry in a `.cellshot` recording timeline.
+/// One JSON Lines entry in a `.termctrl` recording timeline.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -182,7 +182,7 @@ pub fn video(path: &Path, options: &VideoOptions) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let temp = std::env::temp_dir().join(format!(
-        "cellshot-video-{}-{}",
+        "termctrl-video-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -210,7 +210,7 @@ pub struct Recording {
     pub events: Vec<Entry>,
 }
 
-/// Read and validate a versioned `.cellshot` JSON Lines recording.
+/// Read and validate a versioned `.termctrl` JSON Lines recording.
 pub fn read(path: &Path) -> Result<Recording> {
     let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut lines = BufReader::new(file).lines();
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn preserves_input_origin_and_binary_output() {
         let temp =
-            std::env::temp_dir().join(format!("cellshot-recording-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("termctrl-recording-test-{}", std::process::id()));
         let mut writer = Writer::new(&temp, Instant::now(), 2, 1, 9, 18).unwrap();
         writer.output(1, &[0, 255, b'A']).unwrap();
         writer.input(InputOrigin::Host, b"reply").unwrap();
@@ -599,7 +599,7 @@ mod tests {
         options.fps = MAX_VIDEO_FPS + 1;
 
         assert_eq!(
-            video(Path::new("not-read.cellshot"), &options)
+            video(Path::new("not-read.termctrl"), &options)
                 .unwrap_err()
                 .to_string(),
             "--fps must not exceed 1000"
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn rejects_invalid_geometry_and_repeated_headers() {
         let invalid =
-            std::env::temp_dir().join(format!("cellshot-invalid-recording-{}", std::process::id()));
+            std::env::temp_dir().join(format!("termctrl-invalid-recording-{}", std::process::id()));
         fs::write(&invalid, "{\"type\":\"header\",\"version\":1,\"cols\":0,\"rows\":1,\"cell_width\":9,\"cell_height\":18}\n").unwrap();
         assert!(read(&invalid).is_err());
         fs::write(&invalid, "{\"type\":\"header\",\"version\":1,\"cols\":1,\"rows\":1,\"cell_width\":9,\"cell_height\":18}\n{\"type\":\"header\",\"version\":1,\"cols\":1,\"rows\":1,\"cell_width\":9,\"cell_height\":18}\n").unwrap();

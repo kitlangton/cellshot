@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: 22
       - run: cargo build --release
-      - run: node scripts/native-packages.mjs "${{ matrix.package }}" "$PWD/target/release/cellshot" "$PWD/npm-artifacts"
+      - run: node scripts/native-packages.mjs "${{ matrix.package }}" "$PWD/target/release/termctrl" "$PWD/npm-artifacts"
       - uses: actions/upload-artifact@v7
         with:
           name: npm-${{ matrix.package }}

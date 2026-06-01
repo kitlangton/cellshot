@@ -7,10 +7,10 @@ import { pathToFileURL } from "node:url"
 const repository = resolve(import.meta.dirname, "..")
 
 export const nativePackages = [
-  { target: "darwin-arm64", name: "@cellshot/darwin-arm64" },
-  { target: "darwin-x64", name: "@cellshot/darwin-x64" },
-  { target: "linux-arm64-gnu", name: "@cellshot/linux-arm64-gnu" },
-  { target: "linux-x64-gnu", name: "@cellshot/linux-x64-gnu" },
+  { target: "darwin-arm64", name: "@kitlangton/terminal-control-darwin-arm64" },
+  { target: "darwin-x64", name: "@kitlangton/terminal-control-darwin-x64" },
+  { target: "linux-arm64-gnu", name: "@kitlangton/terminal-control-linux-arm64-gnu" },
+  { target: "linux-x64-gnu", name: "@kitlangton/terminal-control-linux-x64-gnu" },
 ]
 
 export const runtimeTargets = {
@@ -28,16 +28,16 @@ export function nativePackage(target) {
 
 export async function packNativePackage(target, binary, output) {
   nativePackage(target)
-  const staging = await mkdtemp(join(tmpdir(), `cellshot-${target}-package-`))
+  const staging = await mkdtemp(join(tmpdir(), `termctrl-${target}-package-`))
   try {
     await mkdir(join(staging, "bin"), { recursive: true })
     await mkdir(output, { recursive: true })
     await cp(join(repository, "packages", target, "package.json"), join(staging, "package.json"))
     await cp(join(repository, "packages", target, "README.md"), join(staging, "README.md"))
     await cp(join(repository, "LICENSE"), join(staging, "LICENSE"))
-    await cp(binary, join(staging, "bin", "cellshot"))
-    await chmod(join(staging, "bin", "cellshot"), 0o755)
-    run(join(staging, "bin", "cellshot"), ["--version"], staging)
+    await cp(binary, join(staging, "bin", "termctrl"))
+    await chmod(join(staging, "bin", "termctrl"), 0o755)
+    run(join(staging, "bin", "termctrl"), ["--version"], staging)
     return pack(staging, output)
   } finally {
     await rm(staging, { recursive: true, force: true })

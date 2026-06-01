@@ -1,11 +1,11 @@
 {
-  "name": "@cellshot/test",
+  "name": "@kitlangton/terminal-control",
   "version": "0.1.0",
-  "description": "Typed terminal application testing with snapshots, recordings, and failure artifacts",
+  "description": "Typed terminal application control and testing with snapshots, recordings, and failure artifacts",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kitlangton/cellshot.git",
+    "url": "https://github.com/kitlangton/terminal-control.git",
     "directory": "packages/test"
   },
   "type": "module",
@@ -33,15 +33,15 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "test": "bun test src/index.test.ts",
+    "test": "cargo build --manifest-path ../../Cargo.toml --bin termctrl && bun test src/index.test.ts",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build"
   },
   "optionalDependencies": {
-    "@cellshot/darwin-arm64": "0.1.0",
-    "@cellshot/darwin-x64": "0.1.0",
-    "@cellshot/linux-arm64-gnu": "0.1.0",
-    "@cellshot/linux-x64-gnu": "0.1.0"
+    "@kitlangton/terminal-control-darwin-arm64": "0.1.0",
+    "@kitlangton/terminal-control-darwin-x64": "0.1.0",
+    "@kitlangton/terminal-control-linux-arm64-gnu": "0.1.0",
+    "@kitlangton/terminal-control-linux-x64-gnu": "0.1.0"
   },
   "peerDependencies": {
     "vitest": ">=3.0.0"

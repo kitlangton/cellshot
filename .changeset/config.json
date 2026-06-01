@@ -4,11 +4,11 @@
   "commit": false,
   "fixed": [
     [
-      "@cellshot/test",
-      "@cellshot/darwin-arm64",
-      "@cellshot/darwin-x64",
-      "@cellshot/linux-arm64-gnu",
-      "@cellshot/linux-x64-gnu"
+      "@kitlangton/terminal-control",
+      "@kitlangton/terminal-control-darwin-arm64",
+      "@kitlangton/terminal-control-darwin-x64",
+      "@kitlangton/terminal-control-linux-arm64-gnu",
+      "@kitlangton/terminal-control-linux-x64-gnu"
     ]
   ],
   "linked": [],

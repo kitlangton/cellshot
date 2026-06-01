@@ -1,5 +1,5 @@
 {
-  "name": "cellshot-workspace",
+  "name": "terminal-control-workspace",
   "private": true,
   "packageManager": "bun@1.3.14",
   "workspaces": [

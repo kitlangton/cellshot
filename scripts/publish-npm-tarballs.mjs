@@ -6,7 +6,8 @@ import { nativePackages } from "./native-packages.mjs"
 const directory = resolve(process.argv[2] ?? "npm-artifacts")
 const checkOnly = process.argv.includes("--check")
 const files = (await readdir(directory)).filter((file) => file.endsWith(".tgz"))
-const expected = ["@cellshot/test", ...nativePackages.map((entry) => entry.name)]
+const clientPackage = "@kitlangton/terminal-control"
+const expected = [clientPackage, ...nativePackages.map((entry) => entry.name)]
 const tarballs = new Map()
 for (const file of files) {
   const manifest = manifestOf(resolve(directory, file))
@@ -25,7 +26,7 @@ const versions = new Set([...tarballs.values()].map(({ version }) => version))
 if (versions.size !== 1) {
   throw new Error(`npm package versions are not aligned: ${[...versions].join(", ")}`)
 }
-for (const name of [...nativePackages.map((entry) => entry.name), "@cellshot/test"]) {
+for (const name of [...nativePackages.map((entry) => entry.name), clientPackage]) {
   if (!checkOnly) publish(resolve(directory, tarballs.get(name).file))
 }
 if (checkOnly) console.log(`validated complete npm release set at version ${[...versions][0]}`)

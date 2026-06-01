@@ -1,27 +1,27 @@
-# @cellshot/test
+# @kitlangton/terminal-control
 
-Typed terminal application testing client for `cellshot driver`, with stable screen snapshots, keyboard interaction, readable logs, recordings, and opt-in failure evidence.
+Typed terminal application control and testing client for `termctrl driver`, with stable screen snapshots, keyboard interaction, readable logs, recordings, and opt-in failure evidence.
 
 Install the package with Vitest after the initial npm publication:
 
 ```bash
-bun add -d @cellshot/test vitest
+bun add -d @kitlangton/terminal-control vitest
 ```
 
-The matching native `cellshot` binary is installed automatically on macOS or GNU/Linux on arm64 or x64:
+The matching native `termctrl` binary is installed automatically on macOS or GNU/Linux on arm64 or x64:
 
 ```ts
-import { createCellshot } from "@cellshot/test"
+import { TerminalControl } from "@kitlangton/terminal-control"
 
-await using cellshot = await createCellshot()
+await using terminal = await TerminalControl.make()
 ```
 
-For development or custom native builds, the runtime resolves an explicit `binaryPath` first, then `CELLSHOT_BINARY`, before the installed native package.
+For development or custom native builds, the runtime resolves an explicit `binaryPath` first, then `TERMCTRL_BINARY`, before the installed native package.
 
 Visible screen text and frames are stable snapshot surfaces:
 
 ```ts
-await using session = await cellshot.launch({ command: ["my-tui"] })
+await using session = await terminal.launch({ command: ["my-tui"] })
 await session.screen.waitForText("Ready")
 expect(await session.screen.text()).toMatchSnapshot()
 ```
