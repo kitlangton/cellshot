@@ -170,6 +170,7 @@ pub struct VideoOptions {
     pub font_family: String,
     pub pixel_ratio: f32,
     pub hide_cursor: bool,
+    pub footer: bool,
     pub fps: u32,
     pub tail: Duration,
     pub include_startup: bool,
@@ -189,8 +190,18 @@ pub fn video(path: &Path, options: &VideoOptions) -> Result<()> {
     if states.is_empty() {
         bail!("recording contains no visible output frames");
     }
+    let caption_placement = if options.footer {
+        CaptionPlacement::Footer
+    } else {
+        CaptionPlacement::Inline
+    };
     let states = match &options.edit {
-        Some(path) => edited_states(states, &recording.events, &read_edit(path)?)?,
+        Some(path) => edited_states(
+            states,
+            &recording.events,
+            &read_edit(path)?,
+            caption_placement,
+        )?,
         None => states.to_vec(),
     };
     let samples = samples(&states, options);
@@ -310,6 +321,7 @@ pub fn shot_at(path: &Path, at_ms: Option<u64>, marker: Option<&str>) -> Result<
 struct VideoFrame {
     at_ms: u64,
     frame: Frame,
+    footer_caption: Option<String>,
 }
 
 struct Replay {
@@ -328,6 +340,7 @@ fn replay(recording: &Recording, cutoff: Option<u64>) -> Replay {
     frames.push(VideoFrame {
         at_ms: 0,
         frame: from_screen(parser.screen()),
+        footer_caption: None,
     });
     for event in &recording.events {
         let at_ms = match event {
@@ -358,7 +371,11 @@ fn replay(recording: &Recording, cutoff: Option<u64>) -> Replay {
         {
             continue;
         }
-        frames.push(VideoFrame { at_ms, frame });
+        frames.push(VideoFrame {
+            at_ms,
+            frame,
+            footer_caption: None,
+        });
     }
     Replay { ansi, frames }
 }
@@ -399,6 +416,12 @@ struct VideoEditClip {
     hold_ms: Option<u64>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptionPlacement {
+    Inline,
+    Footer,
+}
+
 fn read_edit(path: &Path) -> Result<VideoEdit> {
     let edit = serde_json::from_slice(
         &fs::read(path).with_context(|| format!("read {}", path.display()))?,
@@ -431,6 +454,7 @@ fn edited_states(
     states: &[VideoFrame],
     entries: &[Entry],
     edit: &VideoEdit,
+    caption_placement: CaptionPlacement,
 ) -> Result<Vec<VideoFrame>> {
     validate_edit(edit)?;
     let markers = marker_times(entries)?;
@@ -461,7 +485,8 @@ fn edited_states(
             .context("video edit has no visible screen state")?;
         output.push(VideoFrame {
             at_ms: offset,
-            frame: annotate(first.frame.clone(), clip.caption.as_deref()),
+            frame: frame_with_caption(&first.frame, clip.caption.as_deref(), caption_placement),
+            footer_caption: footer_caption(clip.caption.as_deref(), caption_placement),
         });
         output.extend(
             states
@@ -469,7 +494,12 @@ fn edited_states(
                 .filter(|state| state.at_ms > from && state.at_ms <= to)
                 .map(|state| VideoFrame {
                     at_ms: scale_clip_time(clip_start, from, state.at_ms, speed),
-                    frame: annotate(state.frame.clone(), clip.caption.as_deref()),
+                    frame: frame_with_caption(
+                        &state.frame,
+                        clip.caption.as_deref(),
+                        caption_placement,
+                    ),
+                    footer_caption: footer_caption(clip.caption.as_deref(), caption_placement),
                 }),
         );
         let hold_ms = clip.hold_ms.unwrap_or(0);
@@ -480,10 +510,24 @@ fn edited_states(
             output.push(VideoFrame {
                 at_ms: offset,
                 frame: last.frame.clone(),
+                footer_caption: last.footer_caption.clone(),
             });
         }
     }
     Ok(output)
+}
+
+fn frame_with_caption(frame: &Frame, caption: Option<&str>, placement: CaptionPlacement) -> Frame {
+    match placement {
+        CaptionPlacement::Inline => annotate(frame.clone(), caption),
+        CaptionPlacement::Footer => frame.clone(),
+    }
+}
+
+fn footer_caption(caption: Option<&str>, placement: CaptionPlacement) -> Option<String> {
+    (placement == CaptionPlacement::Footer)
+        .then(|| caption.map(str::to_owned))
+        .flatten()
 }
 
 fn scale_clip_time(clip_start: u64, from: u64, at_ms: u64, speed: f64) -> u64 {
@@ -523,20 +567,18 @@ fn annotate(mut frame: Frame, caption: Option<&str>) -> Frame {
         return frame;
     }
     let y = frame.rows;
-    let width = text.chars().count().min(usize::from(u16::MAX)) as u16;
     frame.rows = frame.rows.saturating_add(2);
-    frame.cells.push(Cell {
-        x: 1,
+    push_text_cell(
+        &mut frame,
+        1,
         y,
         text,
-        width,
-        foreground: frame.foreground,
-        background: frame.background,
-        attributes: Attributes {
+        u16::MAX,
+        Attributes {
             bold: true,
             ..Attributes::default()
         },
-    });
+    );
     frame
 }
 
@@ -592,36 +634,46 @@ fn render_video_frames(
         .map(|state| state.frame.rows)
         .max()
         .unwrap_or(recording.rows);
-    let keys = states
+    let base_keys = states
         .iter()
         .map(|state| render_key(&state.frame, cols, rows, options.hide_cursor))
         .collect::<Vec<_>>();
     let mut rendered = HashMap::<Frame, PathBuf>::new();
     let renderer = render::PngRenderer::new();
+    let render_options = render::Options {
+        cell_width: f32::from(options.cell_width.unwrap_or(recording.cell_width)),
+        cell_height: f32::from(options.cell_height.unwrap_or(recording.cell_height)),
+        font_size: f32::from(options.cell_height.unwrap_or(recording.cell_height)) * 0.78,
+        padding: options.padding,
+        font_family: options.font_family.clone(),
+        show_cursor: !options.hide_cursor,
+    };
     for (index, state) in samples.iter().enumerate() {
         let path = temp.join(format!("frame-{index:06}.png"));
-        let key = &keys[*state];
-        if let Some(existing) = rendered.get(key) {
-            fs::hard_link(existing, &path).or_else(|_| fs::copy(existing, &path).map(|_| ()))?;
-            continue;
+        if options.footer {
+            let key = with_footer(
+                base_keys[*state].clone(),
+                states[*state].footer_caption.as_deref(),
+                (u128::from(index as u64) * 1000 / u128::from(options.fps)) as u64,
+            );
+            render_or_link(
+                &renderer,
+                &mut rendered,
+                &key,
+                &path,
+                &render_options,
+                options.pixel_ratio,
+            )?;
+        } else {
+            render_or_link(
+                &renderer,
+                &mut rendered,
+                &base_keys[*state],
+                &path,
+                &render_options,
+                options.pixel_ratio,
+            )?;
         }
-        renderer.render(
-            &render::svg(
-                key,
-                &render::Options {
-                    cell_width: f32::from(options.cell_width.unwrap_or(recording.cell_width)),
-                    cell_height: f32::from(options.cell_height.unwrap_or(recording.cell_height)),
-                    font_size: f32::from(options.cell_height.unwrap_or(recording.cell_height))
-                        * 0.78,
-                    padding: options.padding,
-                    font_family: options.font_family.clone(),
-                    show_cursor: !options.hide_cursor,
-                },
-            ),
-            &path,
-            options.pixel_ratio,
-        )?;
-        rendered.insert(key.clone(), path);
     }
     eprintln!("Rendered {} unique screens.", rendered.len());
     eprintln!("Encoding {}...", options.out.display());
@@ -640,6 +692,23 @@ fn render_video_frames(
     Ok(())
 }
 
+fn render_or_link(
+    renderer: &render::PngRenderer,
+    rendered: &mut HashMap<Frame, PathBuf>,
+    key: &Frame,
+    path: &Path,
+    options: &render::Options,
+    pixel_ratio: f32,
+) -> Result<()> {
+    if let Some(existing) = rendered.get(key) {
+        fs::hard_link(existing, path).or_else(|_| fs::copy(existing, path).map(|_| ()))?;
+        return Ok(());
+    }
+    renderer.render(&render::svg(key, options), path, pixel_ratio)?;
+    rendered.insert(key.clone(), path.to_path_buf());
+    Ok(())
+}
+
 fn render_key(frame: &Frame, cols: u16, rows: u16, hide_cursor: bool) -> Frame {
     let mut frame = frame.clone();
     frame.cols = cols;
@@ -648,6 +717,119 @@ fn render_key(frame: &Frame, cols: u16, rows: u16, hide_cursor: bool) -> Frame {
         frame.cursor = None;
     }
     frame
+}
+
+fn with_footer(mut frame: Frame, caption: Option<&str>, elapsed_ms: u64) -> Frame {
+    const BRAND: &str = "TERMINAL CONTROL";
+    let footer_y = frame.rows.saturating_add(1);
+    frame.rows = frame.rows.saturating_add(2);
+
+    let timecode = format_timecode(elapsed_ms);
+    let brand_width = text_width(BRAND);
+    let time_width = text_width(&timecode);
+    let brand = (brand_width <= frame.cols).then(|| (frame.cols - brand_width, BRAND));
+    let mut reserved_from = brand
+        .map(|(x, _)| x.saturating_sub(1))
+        .unwrap_or(frame.cols);
+    let time = if time_width <= reserved_from {
+        let ideal_x = frame.cols.saturating_sub(time_width) / 2;
+        let max_x = reserved_from - time_width;
+        Some((ideal_x.min(max_x), timecode.as_str()))
+    } else {
+        None
+    };
+    if let Some((x, _)) = time {
+        reserved_from = x.saturating_sub(1);
+    }
+
+    if let Some(caption) = caption {
+        push_footer_cell(
+            &mut frame,
+            1,
+            footer_y,
+            caption,
+            reserved_from.saturating_sub(1),
+            true,
+            false,
+        );
+    }
+    if let Some((x, text)) = time {
+        push_footer_cell(&mut frame, x, footer_y, text, time_width, true, false);
+    }
+    if let Some((x, text)) = brand {
+        push_footer_cell(&mut frame, x, footer_y, text, brand_width, false, true);
+    }
+    frame
+}
+
+fn push_footer_cell(
+    frame: &mut Frame,
+    x: u16,
+    y: u16,
+    text: &str,
+    max_width: u16,
+    faint: bool,
+    bold: bool,
+) {
+    push_text_cell(
+        frame,
+        x,
+        y,
+        text,
+        max_width,
+        Attributes {
+            bold,
+            faint,
+            ..Attributes::default()
+        },
+    );
+}
+
+fn push_text_cell(
+    frame: &mut Frame,
+    x: u16,
+    y: u16,
+    text: impl AsRef<str>,
+    max_width: u16,
+    attributes: Attributes,
+) {
+    if x >= frame.cols || y >= frame.rows || max_width == 0 {
+        return;
+    }
+    let available = (frame.cols - x).min(max_width);
+    let text = truncate(text.as_ref(), available);
+    if text.is_empty() {
+        return;
+    }
+    frame.cells.push(Cell {
+        x,
+        y,
+        width: text_width(&text),
+        text,
+        foreground: frame.foreground,
+        background: frame.background,
+        attributes,
+    });
+}
+
+fn truncate(text: &str, max_width: u16) -> String {
+    text.chars().take(usize::from(max_width)).collect()
+}
+
+fn text_width(text: &str) -> u16 {
+    text.chars().count().min(usize::from(u16::MAX)) as u16
+}
+
+fn format_timecode(elapsed_ms: u64) -> String {
+    let total_seconds = elapsed_ms / 1000;
+    let seconds = total_seconds % 60;
+    let minutes = (total_seconds / 60) % 60;
+    let hours = total_seconds / 3600;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 #[cfg(test)]
@@ -686,6 +868,7 @@ mod tests {
             font_family: String::new(),
             pixel_ratio: 1.0,
             hide_cursor: true,
+            footer: false,
             fps: 20,
             tail: Duration::ZERO,
             include_startup: false,
@@ -721,10 +904,12 @@ mod tests {
                 VideoFrame {
                     at_ms: 0,
                     frame: initial,
+                    footer_caption: None,
                 },
                 VideoFrame {
                     at_ms: 4000,
                     frame: final_frame.clone(),
+                    footer_caption: None,
                 },
             ],
             &options(),
@@ -743,14 +928,17 @@ mod tests {
                 VideoFrame {
                     at_ms: 0,
                     frame: first.clone(),
+                    footer_caption: None,
                 },
                 VideoFrame {
                     at_ms: 1000,
                     frame: second.clone(),
+                    footer_caption: None,
                 },
                 VideoFrame {
                     at_ms: 2000,
                     frame: first.clone(),
+                    footer_caption: None,
                 },
             ],
             &[
@@ -772,6 +960,7 @@ mod tests {
                     hold_ms: Some(500),
                 }],
             },
+            CaptionPlacement::Inline,
         )
         .unwrap();
 
@@ -785,13 +974,87 @@ mod tests {
     }
 
     #[test]
+    fn edit_plan_can_place_captions_in_footer_metadata() {
+        let states = edited_states(
+            &[VideoFrame {
+                at_ms: 0,
+                frame: frame("a"),
+                footer_caption: None,
+            }],
+            &[
+                Entry::Marker {
+                    at_ms: 0,
+                    name: "start".to_owned(),
+                },
+                Entry::Marker {
+                    at_ms: 0,
+                    name: "done".to_owned(),
+                },
+            ],
+            &VideoEdit {
+                clips: vec![VideoEditClip {
+                    from: "start".to_owned(),
+                    to: "done".to_owned(),
+                    caption: Some("footer caption".to_owned()),
+                    speed: None,
+                    hold_ms: None,
+                }],
+            },
+            CaptionPlacement::Footer,
+        )
+        .unwrap();
+
+        assert_eq!(states[0].frame.rows, 1);
+        assert_eq!(states[0].frame.text(), "a");
+        assert_eq!(states[0].footer_caption.as_deref(), Some("footer caption"));
+    }
+
+    #[test]
+    fn footer_adds_caption_timecode_and_branding() {
+        let frame = with_footer(frame("body"), Some("demo caption"), 65_000);
+        let text = frame.text();
+
+        assert_eq!(frame.rows, 3);
+        assert!(text.contains("body"));
+        assert!(text.contains("demo caption"));
+        assert!(text.contains("01:05"));
+        assert!(text.contains("TERMINAL CONTROL"));
+    }
+
+    #[test]
+    fn footer_avoids_overlapping_cells_when_narrow() {
+        let mut narrow = frame("body");
+        narrow.cols = 10;
+        let frame = with_footer(narrow, Some("demo caption"), 65_000);
+        let mut spans = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.y == 2)
+            .map(|cell| (cell.x, cell.x + cell.width))
+            .collect::<Vec<_>>();
+        spans.sort();
+
+        assert!(spans.iter().all(|(_, end)| *end <= frame.cols));
+        assert!(spans.windows(2).all(|pair| pair[0].1 <= pair[1].0));
+    }
+
+    #[test]
     fn edit_plan_rejects_missing_or_duplicate_markers() {
         let states = [VideoFrame {
             at_ms: 0,
             frame: frame("a"),
+            footer_caption: None,
         }];
 
-        assert!(edited_states(&states, &[], &edit("missing", "done")).is_err());
+        assert!(
+            edited_states(
+                &states,
+                &[],
+                &edit("missing", "done"),
+                CaptionPlacement::Inline
+            )
+            .is_err()
+        );
         assert!(
             edited_states(
                 &states,
@@ -806,6 +1069,7 @@ mod tests {
                     },
                 ],
                 &edit("start", "start"),
+                CaptionPlacement::Inline,
             )
             .is_err()
         );
@@ -882,10 +1146,12 @@ mod tests {
             VideoFrame {
                 at_ms: 0,
                 frame: frame(""),
+                footer_caption: None,
             },
             VideoFrame {
                 at_ms: 1,
                 frame: painted.clone(),
+                footer_caption: None,
             },
         ];
 
@@ -901,10 +1167,12 @@ mod tests {
                 VideoFrame {
                     at_ms: 0,
                     frame: initial.clone(),
+                    footer_caption: None,
                 },
                 VideoFrame {
                     at_ms: 1,
                     frame: final_frame.clone(),
+                    footer_caption: None,
                 },
             ],
             &options(),
@@ -925,10 +1193,12 @@ mod tests {
                 VideoFrame {
                     at_ms: 0,
                     frame: initial.clone(),
+                    footer_caption: None,
                 },
                 VideoFrame {
                     at_ms: 100,
                     frame: final_frame.clone(),
+                    footer_caption: None,
                 },
             ],
             &options,

@@ -89,6 +89,8 @@ pause between clips. Use `--tail-ms 0` if the final frame should not be held aft
 reused. Pass `--include-startup` to retain blank startup or capability negotiation frames. The source
 `.termctrl` file always retains the original timing, terminal bytes, client input, automatic host
 input, and markers until the session is closed. Video export requires `ffmpeg` to be installed.
+Pass `--footer` to add a bottom row with the clip caption, elapsed timecode, and TERMINAL CONTROL
+branding; without it, edit-plan captions render as inline annotation rows.
 
 Example:
   termctrl start demo --record captures/demo.termctrl -- opencode
@@ -498,6 +500,9 @@ struct VideoArgs {
     /// Hide the terminal cursor in rendered output.
     #[arg(long)]
     hide_cursor: bool,
+    /// Add a bottom footer with clip caption, elapsed timecode, and TERMINAL CONTROL branding.
+    #[arg(long)]
+    footer: bool,
     /// Maximum sampled frames per second (1 to 1000).
     #[arg(long, default_value_t = 20)]
     fps: u32,
@@ -596,6 +601,7 @@ fn main() -> Result<()> {
                     font_family: args.font_family,
                     pixel_ratio: args.pixel_ratio,
                     hide_cursor: args.hide_cursor,
+                    footer: args.footer,
                     fps: args.fps,
                     tail: Duration::from_millis(args.tail_ms),
                     include_startup: args.include_startup,

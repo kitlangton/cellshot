@@ -1,6 +1,6 @@
 ---
 name: terminal-control
-description: Control and test terminal applications with the termctrl CLI by reading visible screen state, driving named live sessions, sending typed keyboard input, waiting for text, collecting explicit evidence, and recording timelines. Use when an agent must operate or verify a TUI, REPL, interactive CLI, shell process, OpenTUI application, or other terminal-backed workflow.
+description: Control and test terminal applications with the termctrl CLI by reading visible screen state, driving named live sessions, sending typed keyboard input, waiting for text, collecting explicit evidence, recording timelines, marking important moments, and exporting edited videos. Use when an agent must operate or verify a TUI, REPL, interactive CLI, shell process, OpenTUI application, or other terminal-backed workflow.
 ---
 
 # Terminal Control
@@ -69,10 +69,24 @@ Save only requested formats:
 
 ```bash
 termctrl save app --format txt --format png --out artifacts/current
-termctrl start app --record artifacts/run.termctrl -- my-terminal-app
-termctrl stop app
-termctrl video artifacts/run.termctrl --out artifacts/run.mp4
 ```
+
+Record demos only when the user wants a retained timeline or video. Add markers while the session is running, inspect them after stopping, then export with an explicit edit plan:
+
+```bash
+termctrl start app --record artifacts/run.termctrl -- my-terminal-app
+termctrl wait app "Ready" --timeout 5000
+termctrl mark app ready
+termctrl send app text:demo enter
+termctrl wait app "Done" --timeout 60000
+termctrl mark app done
+termctrl stop app
+termctrl markers artifacts/run.termctrl
+termctrl show --recording artifacts/run.termctrl --at-marker done
+termctrl video artifacts/run.termctrl --edit artifacts/run-edit.json --footer --out artifacts/run.mp4
+```
+
+Use edit-plan `speed` values conservatively when terminal text should remain readable. Use `hold_ms` or `--tail-ms` when the final frame is the payoff. Pass `--footer` when a polished demo should show the clip caption, elapsed timecode, and `TERMINAL CONTROL` branding in a bottom footer; omit it for ordinary videos.
 
 Treat `.termctrl` recordings, ANSI transcripts, screen artifacts, command arguments, and terminal input as potentially sensitive. Do not retain them unless needed, and do not expose their contents unnecessarily.
 

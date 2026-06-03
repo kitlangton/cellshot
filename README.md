@@ -9,7 +9,97 @@ Control, inspect, test, and capture real terminal applications for agents and TU
 
 Saved from one live OpenCode session using `start`, `send`, and `save`.
 
-## Install
+## Agent Quickstart
+
+Terminal Control is built for agents first. Install the `termctrl` binary, install the skill, then ask your coding agent to operate terminal applications through a real pseudo-terminal instead of guessing from plain command output.
+
+Requires Rust 1.93 or newer. Video export also requires `ffmpeg`.
+
+```bash
+cargo install terminal-control
+termctrl --help
+```
+
+Install the current repository head instead of the latest crate release:
+
+```bash
+cargo install --locked --git https://github.com/kitlangton/terminal-control terminal-control
+```
+
+Install the agent skill from this repository:
+
+```bash
+npx skills add kitlangton/terminal-control --skill terminal-control
+```
+
+Then ask your agent for terminal work in ordinary language:
+
+```text
+Use terminal-control to open my TUI, press through the setup flow, and save a screenshot of the final screen.
+```
+
+```text
+Start two terminal sessions: one running the dev server and one running the CLI. Drive the CLI until it connects, then show me both screens.
+```
+
+```text
+Record yourself using the terminal app, mark the important moments, and export a short MP4 demo.
+```
+
+The skill teaches agents the safe workflow: start named sessions, wait for visible text, send exact input, inspect screens, save artifacts, record timelines, mark important moments, export videos, and stop sessions when finished.
+
+## What It Gives Agents
+
+- Real PTY control for TUIs, shells, curses apps, OpenTUI apps, and long-running CLIs.
+- Named background sessions so an agent can keep multiple terminals alive and switch between them.
+- Visible-screen reads through `show`, not brittle scraping of scrollback or logs.
+- Exact keyboard and text input with `send`, including arrows, tabs, enter, escape, page keys, and `ctrl-a` through `ctrl-z`.
+- Explicit waits for rendered text before interacting.
+- Resizing to test responsive terminal layouts.
+- Evidence capture as PNG, SVG, text, JSON, or ANSI when requested.
+- Recording timelines with markers, edited MP4 export, and optional branded footers for demos and bug reports.
+- Local-only owner-protected session sockets and explicit warnings around sensitive terminal artifacts.
+
+## CLI Quickstart
+
+Read a one-off terminal screen:
+
+```bash
+termctrl show --cols 100 --rows 32 -- my-terminal-app
+```
+
+Save evidence:
+
+```bash
+termctrl save --format png --format txt --out captures/home -- my-terminal-app
+```
+
+Drive a persistent TUI session:
+
+```bash
+termctrl start demo --host opentui --cols 112 --rows 34 -- opencode
+termctrl wait demo "Ask anything" --timeout 20000
+termctrl send demo --pace-ms 35 'text:Write a terminal haiku.' enter
+termctrl show demo
+termctrl stop demo
+```
+
+Record and export a video:
+
+```bash
+termctrl start demo --host opentui --record captures/demo.termctrl -- opencode
+termctrl wait demo "Ask anything"
+termctrl mark demo ready
+termctrl send demo --pace-ms 35 'text:Write a short terminal haiku. End with DONE.' enter
+termctrl wait demo "DONE" --timeout 60000
+termctrl mark demo after-answer
+termctrl stop demo
+termctrl video captures/demo.termctrl --edit captures/demo.json --out captures/demo.mp4
+```
+
+The sections below explain each workflow in more detail.
+
+## Install The CLI
 
 Requires Rust 1.93 or newer. Video export also requires `ffmpeg`.
 
@@ -125,7 +215,7 @@ termctrl stop demo
 
 termctrl markers captures/demo.termctrl
 termctrl show --recording captures/demo.termctrl --at-marker after-answer
-termctrl video captures/demo.termctrl --edit captures/demo.json --tail-ms 0 --hide-cursor --out captures/demo.mp4
+termctrl video captures/demo.termctrl --edit captures/demo.json --footer --tail-ms 0 --hide-cursor --out captures/demo.mp4
 ```
 
 The marker-based edit plan is explicit and deterministic. `speed` accelerates or slows the real recorded time inside that clip. `caption` adds a visible annotation row. `hold_ms` is optional and creates a deliberate still frame at the end of a clip; omit it when you do not want artificial freezes.
@@ -143,7 +233,7 @@ The marker-based edit plan is explicit and deterministic. `speed` accelerates or
 }
 ```
 
-Without `--edit`, video export preserves the observed recording timing. Edit plans are preferable for polished demos because they select intentional marker ranges and can accelerate animated spinner spans without relying on visual-idle heuristics. Identical rendered screens are rasterized once and reused during export. Video export trims startup frames before non-whitespace text by default while still preserving recordings that only paint terminal backgrounds; use `--include-startup` to keep all startup frames. `video` holds the final frame for one second by default so short recordings do not end abruptly; pass `--tail-ms 0` for a strict no-holds cut.
+Without `--edit`, video export preserves the observed recording timing. Edit plans are preferable for polished demos because they select intentional marker ranges and can accelerate animated spinner spans without relying on visual-idle heuristics. Keep speeds low enough for important terminal text to remain readable, and add `hold_ms` or leave a `--tail-ms` hold when the final screen is the point of the demo. Identical rendered screens are rasterized once and reused during export. Video export trims startup frames before non-whitespace text by default while still preserving recordings that only paint terminal backgrounds; use `--include-startup` to keep all startup frames. `video` holds the final frame for one second by default so short recordings do not end abruptly; pass `--tail-ms 0` for a strict no-holds cut. Pass `--footer` to put the clip caption, elapsed timecode, and `TERMINAL CONTROL` branding in a bottom footer instead of rendering captions as inline annotation rows.
 
 Use `termctrl markers captures/demo.termctrl` to audit available marker names and timestamps. Use `termctrl show --recording captures/demo.termctrl --at-marker after-answer` or `--at-ms 1234` to inspect exact screens while tuning an edit plan.
 
@@ -323,16 +413,6 @@ Enable a recording with `record: true` or `record: "on-failure"`; a test may exp
 await session.resize({ cols: 120, rows: 40 })
 await session.saveRecording("artifacts/navigation.termctrl")
 ```
-
-## Agent Skill
-
-This repository publishes an agent skill that teaches coding agents to inspect and drive terminal applications through `termctrl` instead of guessing at interactive state. Install it from the repository with the Skills CLI:
-
-```bash
-npx skills add kitlangton/terminal-control --skill terminal-control
-```
-
-The skill covers one-off visible reads, named live-session workflows, OpenTUI startup, explicit evidence capture, recording handling, and the sensitivity of terminal transcripts and input.
 
 ### npm Release
 
