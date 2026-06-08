@@ -723,4 +723,53 @@ mod tests {
         assert!(from_ansi(Vec::new(), 0, 1, 1).is_err());
         assert!(from_ansi(Vec::new(), 1, 0, 1).is_err());
     }
+
+    #[test]
+    fn retain_appends_bytes_when_under_the_limit() {
+        let mut buffer = Vec::new();
+        retain(&mut buffer, b"hello", 16).unwrap();
+        assert_eq!(buffer, b"hello");
+    }
+
+    #[test]
+    fn retain_preserves_existing_bytes_across_multiple_calls() {
+        let mut buffer = Vec::new();
+        retain(&mut buffer, b"abc", 16).unwrap();
+        retain(&mut buffer, b"defgh", 16).unwrap();
+        assert_eq!(buffer, b"abcdefgh");
+    }
+
+    #[test]
+    fn retain_allows_appending_exactly_to_the_max_bytes_boundary() {
+        let mut buffer = Vec::new();
+        retain(&mut buffer, b"abc", 8).unwrap();
+        // Exactly fills the buffer; second call with an empty slice should still succeed.
+        retain(&mut buffer, b"", 8).unwrap();
+        retain(&mut buffer, b"de", 8).unwrap();
+        assert_eq!(buffer, b"abcde");
+    }
+
+    #[test]
+    fn retain_rejects_an_append_that_would_exceed_max_bytes() {
+        let mut buffer = b"abc".to_vec();
+        let err = retain(&mut buffer, b"defghij", 8).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("exceeds --max-bytes"),
+            "error should mention the cap, got: {message}"
+        );
+        assert!(
+            message.contains("8"),
+            "error should include the configured cap, got: {message}"
+        );
+        // The buffer must not be partially mutated on failure.
+        assert_eq!(buffer, b"abc");
+    }
+
+    #[test]
+    fn retain_rejects_when_the_first_call_already_overflows() {
+        let mut buffer = Vec::new();
+        assert!(retain(&mut buffer, b"abcdef", 4).is_err());
+        assert!(buffer.is_empty(), "rejected appends must not write anything");
+    }
 }
